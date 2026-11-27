@@ -1,6 +1,8 @@
 import { runtimeFields, ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
-import { createPermissionPanel } from "./permission-panel.js";
+import { createPermissionPanel, taskPermissionSummary } from "./permission-panel.js";
 import { esc, ago, stateBlock } from "./panel-state.js";
+
+const resultCharacters = typeof Intl.Segmenter === "function" ? new Intl.Segmenter() : null;
 
 // One presentation for direct and embedded Plane. No transport is constructed
 // here: the default read-only client never supplies a write capability.
@@ -29,7 +31,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   let storage;
   try { storage = sessionStorage; } catch { storage = null; }
   const state = new ActionState(storage);
-  const permissions = createPermissionPanel({api,storage});
+  const permissions = createPermissionPanel({api, storage, onSummaryChange: paintPermissionSummary});
   const contextsByKind = new Map(), checkingReceipts = new Set();
   const actionRefreshEpochs = new Map(), deniedContexts = new Set(), checkingTaskContexts = new Set();
   const deniedNote = 'Action access is not authorized for this team. Reading remains available. The host owner must approve action access.';
@@ -528,10 +530,28 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       text = prose(task.history?.find(same));
     }
     if (!text) return `<p class="detail-empty">${closed ? "Result" : "Update"} text is not available in this snapshot. Open task details below to inspect the recorded reports and history.</p>`;
-    if (text.length <= 1000) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
+    // Older browsers can show the full bounded record when they cannot find a grapheme boundary.
+    let end = text.length;
+    if (end > 1000 && resultCharacters) {
+      let count = 0;
+      for (const {index} of resultCharacters.segment(text)) {
+        if (count === 1000) {
+          end = index;
+          break;
+        }
+        count++;
+      }
+    }
+    if (end === text.length) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
     return `<p class="note">${closed ? "Result" : "Update"} excerpt (first 1,000 characters).</p>
-      <pre class="task-record-body task-result">${esc(text.slice(0, 1000))}…</pre>
+      <pre class="task-record-body task-result">${esc(text.slice(0, end))}…</pre>
       <details class="task-record-details"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body">${esc(text)}</pre></details>`;
+  }
+  function paintPermissionSummary(summary) {
+    const status = $("task-permission-summary");
+    if (!status) return;
+    if (status.textContent !== summary) status.textContent = summary;
+    status.hidden = !summary;
   }
   function renderDetail(task, boardOnly, unavailable = null) {
     paintAccess();
@@ -541,6 +561,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     content.innerHTML = `<p class="eyebrow">${esc(roomLabel(task.fleet || "Team not recorded"))} · TASK</p>
       <h2 id="task-detail-title">${esc(task.title || "Recorded task")}</h2>
       <p class="task-state"><b>${esc(task.state || "State unknown")}</b></p>
+      <p id="task-permission-summary" class="task-question" role="status" hidden></p>
       ${unavailable ? stateBlock(unavailable.state || "unavailable", unavailable.provenance, unavailable.remediation) : ""}
       <dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assigneeLabel(assignment))}</dd>
       <dt>Last recorded action</dt><dd>${esc(lastEvent?.event || "No action recorded")} · ${esc(ago(lastEvent?.occurred_at))}</dd>
@@ -575,6 +596,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       ${(task.issues || []).length ? `<h3>History issues</h3><ul>${task.issues.map(i => `<li>${esc(i.code)}${i.blocking ? " · unresolved" : " · historical"}</li>`).join("")}</ul>` : ""}
       ${task.issues_window?.truncated ? '<p class="note">Additional history issues are omitted from this bounded view.</p>' : ""}</details>`}
       <p class="note">Task state, history, recorded reports and action selection are a snapshot. Use Refresh to read them again.</p>`;
+    paintPermissionSummary(taskPermissionSummary(task));
     detailSnapshot = { task: Object.freeze({ ...task, ...(Object.hasOwn(task, "current_assignment")
       ? { current_assignment: task.current_assignment && Object.freeze({ ...task.current_assignment }) } : {}) }), boardOnly };
     if (!boardOnly) void permissions.show($("task-permissions"),task);
@@ -762,6 +784,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   $("task-detail-close").onclick = closeDetail;
   $("task-detail-refresh").onclick = () => { ++compositionEpoch; detail(); $("task-detail-refresh").hidden = true; };
   dialog.addEventListener("close", () => {
+    permissions.close();
     ++detailEpoch; pendingDetail = null;
     paintAccess();
     $("task-detail-content").innerHTML = "";

@@ -463,13 +463,20 @@ test('task result and feedback precede closed history without inventing descript
   assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
 });
 
-test('missing current assignment receipt stays unconfirmed rather than implying delivery', async () => {
-  const response = canonicalDetail('task-a');
-  response.data.task.state = 'active'; response.data.task.current_assignment = {assignee_alias:'Worker'};
-  const h = harness({jget:()=>response}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
-  assert.match(h.get('task-detail-content').innerHTML,/Delivery of the current assignment is not confirmed/);
-  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/No current assignment to check/);
-  assert.match(h.get('task-detail-content').innerHTML,/<h3>Latest recorded update<\/h3>/);
+test('the assigned worker stays visible when delivery has no confirming receipt', async () => {
+  for (const integrity of [null, 'unconfirmed']) {
+    const response = canonicalDetail('task-a');
+    response.data.task.state = 'active';
+    response.data.task.current_assignment = {assignee_alias:'Worker'};
+    response.data.task.delivery = {message_id:'msg_example', integrity};
+    const h = harness({jget:()=>response}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
+    const html = h.get('task-detail-content').innerHTML;
+    assert.match(html, /Assigned to<\/dt><dd>Worker/);
+    assert.ok(html.includes('<dt>Current assignment delivery</dt><dd>'
+      + (integrity || 'Delivery of the current assignment is not confirmed in this view.') + '</dd>'));
+    assert.doesNotMatch(html, /No current assignment to check/);
+    assert.match(html, /<h3>Latest recorded update<\/h3>/);
+  }
 });
 
 for (const mismatch of [null,'event_id','event','task_id','assignment_id'])
@@ -502,6 +509,28 @@ test('long result is an escaped labelled excerpt with full text in a closed disc
   assert.doesNotMatch(html,/<full-result-tail>|<details[^>]*\bopen\b/);
   assert.ok(html.indexOf('Read full result')<html.indexOf('<h3>Feedback and conversation</h3>'));
 });
+
+for (const [state, field, event] of [
+  ['active', 'last_event', 'progress'],
+  ['completed', 'terminal_event', 'completed'],
+]) {
+  test(`the ${state} task preview counts whole visible characters`, async () => {
+    const firstThousand = 'a'.repeat(997) + 'e\u0301🇨🇦👩🏽‍💻';
+    for (const tail of ['', '城']) {
+      const response = canonicalDetail('task-a');
+      const task = response.data.task;
+      task.state = state;
+      task[field] = {event, detail: JSON.stringify({summary: firstThousand + tail})};
+      const h = harness({jget: () => response});
+      h.loop.setRoom('web'); await settle(); h.open(); await settle();
+      const html = h.get('task-detail-content').innerHTML;
+      const preview = html.match(/<pre class="task-record-body task-result">([^<]*)<\/pre>/)[1];
+      assert.equal(preview, firstThousand + (tail ? '…' : ''));
+      assert.equal(html.includes('<summary>Read full '), Boolean(tail));
+      if (tail) assert.ok(html.includes(firstThousand + tail + '</pre>'));
+    }
+  });
+}
 
 test('late detail cannot replace another selected task or reopen a closed dialog', async () => {
   const first=deferred();
@@ -1785,6 +1814,7 @@ const permissionOptions=extra=>({interactionContext:()=>null,permissionContext:(
  crypto:{randomUUID:()=> '11111111-1111-4111-8111-111111111111'},sendAction:permissionReceipt,actionReceipt:permissionReceipt,...extra});
 async function openPermission(h){h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();return h.get('task-permissions');}
 function selectPermission(h,panel,decision){panel.onclick({target:panel.querySelectorAll('[data-permission-decision]').find(b=>b.dataset.permissionDecision===decision)});h.get('permission-decision-reason').value='Owner reason';h.get('permission-decision-reason').oninput();}
+const taskPermissionStatus = h => h.get('task-permission-summary')?.textContent || '';
 
 test('task permission panel requires explicit decision, retains a lost-response UUID and only inspects it after reload',async()=>{
  const storage=store(),h=harness(permissionOptions({storage,sendAction:()=>{throw Error('Lost response');}})),panel=await openPermission(h);
@@ -1794,10 +1824,48 @@ test('task permission panel requires explicit decision, retains a lost-response 
  assert.equal(h.sends.length,1);assert.ok(!storage.getItem('plane.pending-permissions.v1').includes('Owner reason'));
  const restored=harness(permissionOptions({storage})),next=await openPermission(restored);
  assert.ok(next.querySelectorAll('[data-permission-decision]').every(b=>b.disabled));
+ assert.match(taskPermissionStatus(restored), /1 permission request needs review/);
  next.onclick({target:next.querySelectorAll('[data-permission-receipt]')[0]});await settle();
  assert.equal(restored.sends.length,0);assert.equal(restored.lookups.length,1);
  assert.match(next.innerHTML,/Permission is currently approved/);assert.equal(storage.getItem('plane.pending-permissions.v1'),'[]');
+ assert.equal(taskPermissionStatus(restored), '');
  selectPermission(restored,next,'revoke');assert.equal(restored.sends.length,0);
+});
+
+test('a recorded decision updates permission status without clearing incomplete history', async () => {
+  const missing = {permission_id: 'perm_' + '8'.repeat(32), task_id: nudgeTaskId, state: 'unavailable'};
+  const another = {...permissionRecord, permission_id: 'perm_' + '9'.repeat(32), request_event_id: 'ev_' + 'a'.repeat(32)};
+  for (const [has_more, permissions, before, after] of [
+    [false, [permissionRecord], /^1 permission request needs review$/, ''],
+    [false, [permissionRecord, another], /^2 permission requests need review$/, '1 permission request needs review'],
+    [true, [permissionRecord], /At least 1 permission request.*history is incomplete/, 'Permission history is incomplete'],
+    [false, [permissionRecord, missing], /At least 1 permission request.*history is incomplete/, 'Permission history is incomplete'],
+  ]) {
+    const context = {...ownerPermission, permissions, has_more};
+    const h = harness(permissionOptions({permissionContext: () => context}));
+    const panel = await openPermission(h);
+    assert.match(taskPermissionStatus(h), before);
+    selectPermission(h, panel, 'approve');
+    await h.get('permission-decision-form').onsubmit({preventDefault() {}});
+    assert.match(panel.innerHTML, /Permission is currently approved/);
+    assert.equal(taskPermissionStatus(h), after);
+  }
+});
+
+test('an unknown or mismatched decision receipt leaves the pending summary and original request', async () => {
+  for (const outcome of ['unknown', 'mismatched']) {
+    const h = harness(permissionOptions({sendAction: request => {
+      const receipt = permissionReceipt(request);
+      return outcome === 'unknown' ? {...receipt, status: 'unknown', permission: null}
+        : {...receipt, request_id: '22222222-2222-4222-8222-222222222222'};
+    }}));
+    const panel = await openPermission(h);
+    selectPermission(h, panel, 'approve');
+    await h.get('permission-decision-form').onsubmit({preventDefault() {}});
+    assert.match(taskPermissionStatus(h), /1 permission request needs review/);
+    assert.match(panel.innerHTML, /outcome is unconfirmed/i);
+    assert.equal(new ActionState(h.storage, 'plane.pending-permissions.v1').pending[0].request_id, h.sends[0].request_id);
+  }
 });
 
 test('changing task access during permission preparation prevents send; a new task cannot accept the old response',async()=>{
@@ -1806,9 +1874,14 @@ test('changing task access during permission preparation prevents send; a new ta
  h.loop.invalidate(undefined,ownerPermission.scope,'permission');
  const {body,...metadata}=h.preparations[0];preparation.resolve({...metadata,semantic_sha256:'d'.repeat(64)});await submitting;
  assert.equal(h.sends.length,0);assert.match(panel.innerHTML,/Permission access paused/);
- const response=deferred(),j=harness(permissionOptions({sendAction:()=>response.promise})),other=await openPermission(j);
+ const nextTask = {...ownerDetail().data.task, task_id: 'wi_' + 'f'.repeat(32), fleet: 'other', permission_pending: 2};
+ const response=deferred(),j=harness(permissionOptions({sendAction:()=>response.promise,
+   jget: url => url.includes(nudgeTaskId) ? ownerDetail() : {state: 'ok', data: {task: nextTask}}})),other=await openPermission(j);
  selectPermission(j,other,'approve');const sending=j.get('permission-decision-form').onsubmit({preventDefault(){}});await settle();
- j.get('task-detail-close').onclick();await settle();response.resolve(permissionReceipt(j.sends[0]));await sending;
+ j.loop.setRoom('other');await settle();j.open(nextTask.task_id, 'other');await settle();
+ assert.match(taskPermissionStatus(j), /2 permission requests need review/);
+ response.resolve(permissionReceipt(j.sends[0]));await sending;
+ assert.match(taskPermissionStatus(j), /2 permission requests need review/);
  assert.equal(new ActionState(j.storage,'plane.pending-permissions.v1').pending.length,1);
 });
 
@@ -1818,6 +1891,7 @@ test('recorded permission keeps an uncertain notification receipt across reload 
  selectPermission(h,panel,'approve');await h.get('permission-decision-form').onsubmit({preventDefault(){}});
  const original=JSON.parse(storage.getItem('plane.pending-permissions.v1'))[0];
  assert.ok(original.request_id);assert.match(panel.innerHTML,/notification is unconfirmed/);
+ assert.equal(taskPermissionStatus(h), '');
  const approved={...ownerPermission,permissions:[permissionReceipt(h.sends[0]).permission]};
  const restored=harness(permissionOptions({storage,permissionContext:()=>approved,
    actionReceipt:request=>({...permissionReceipt(request),notification:'received'})})),next=await openPermission(restored);
@@ -1977,6 +2051,27 @@ test('permission panel distinguishes explicit denial from unavailable access wit
     assert.equal(panel.querySelectorAll('[data-permission-decision]').length,0);
     assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
   }
+});
+
+test('a reader sees pending permission status by the task title as the record changes', async () => {
+  const detail = ownerDetail();
+  const task = detail.data.task;
+  const h = harness(permissionOptions({jget: () => detail, permissionContext: () => { throw actionDenied(); }}));
+  for (const [count, incomplete, expected] of [
+    [1, false, '1 permission request needs review'],
+    [2, true, 'At least 2 permission requests need review. Permission history is incomplete'],
+    [0, true, 'Permission history is incomplete'],
+    [0, false, null],
+  ]) {
+    task.permission_pending = count;
+    task.permission_incomplete = incomplete;
+    const panel = await openPermission(h);
+    assert.match(h.get('task-detail-content').innerHTML, /id="task-permission-summary"[\s\S]*<dl class="task-facts">/);
+    assert.equal(taskPermissionStatus(h), expected || '');
+    assert.equal(h.get('task-permission-summary').hidden, !expected);
+    assert.equal(panel.querySelectorAll('[data-permission-decision]').length, 0);
+  }
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
 });
 
 test('message denial preserves the useful authorized feedback-only path',async()=>{
