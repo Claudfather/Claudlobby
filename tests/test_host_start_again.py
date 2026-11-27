@@ -166,14 +166,7 @@ def refused(module, home, verb, code, *, state="refused", revision=NEW):
     with pytest.raises(module.Refusal) as error:
         call(module, verb, revision)
     assert (error.value.code, error.value.state) == (code, state), (verb, error.value.code)
-    after = snapshot(home)
-    # The one write before the checks, only by start-again: an empty private update.lock the
-    # updater would make itself, when a computer that never updated has none.
-    made = after.keys() - before.keys()
-    assert made <= {FAMILY + "/data/state/update.lock"} and (verb == "start-again" or not made), made
-    for key in made:
-        assert after.pop(key) == (0o600, b"")
-    assert after == before
+    assert snapshot(home) == before
 
 
 def refuses_both(module, home, code, **kwargs):
@@ -226,11 +219,12 @@ def test_the_mac_refuses_a_runtime_that_is_not_the_admitted_profile(tmp_path, mo
     refuses_both(module, home, "account_changed")
 
 
-@pytest.mark.parametrize("name", [".config", "Library"])
+@pytest.mark.parametrize("name", ["Library/LaunchAgents/com.example.other.plist", ".config/systemd/user/notes.txt"])
 def test_a_mac_folder_for_units_is_only_read(tmp_path, monkeypatch, name):
     module, home, family, outer = world(tmp_path, monkeypatch, system="Darwin")
+    content = (home / name).read_bytes()
     removed_cleanly(module, home, family, outer)
-    assert (home / "Library/LaunchAgents/com.example.other.plist").read_bytes() == b"someone else's"
+    assert (home / name).read_bytes() == content
 
 
 def test_a_wrong_account_is_refused_first(tmp_path, monkeypatch):
@@ -717,25 +711,17 @@ def test_the_status_verb_takes_no_lock_exclusively_and_writes_nothing(tmp_path, 
     assert operations and set(operations) == {fcntl.LOCK_SH}
 
 
-def test_the_removal_takes_every_lock_exclusively_in_order_and_makes_update_lock(tmp_path, monkeypatch):
+def test_the_removal_takes_every_lock_exclusively_in_order(tmp_path, monkeypatch):
     module, home, family, outer = world(tmp_path, monkeypatch)
-    (family / "data/state/update.lock").unlink()
+    names = ["install/preparation.lock", "data/state/runtime-use.lock", "data/state/update.lock",
+             "data/state/owner/owner.sock.lock", "data/state/setup-preview.lock", "data/state/provider-signin.lock"]
+    inodes = [(family / name).lstat().st_ino for name in names]
     held = []
     real = fcntl.flock
-    def recording(fd, op):
-        held.append((os.fstat(fd).st_ino, op & ~fcntl.LOCK_NB))
-        return real(fd, op)
-    inodes = {name: (family / name).lstat().st_ino for name in (
-        "install/preparation.lock", "data/state/runtime-use.lock", "data/state/owner/owner.sock.lock",
-        "data/state/setup-preview.lock", "data/state/provider-signin.lock")}
-    monkeypatch.setattr(module.fcntl, "flock", recording)
+    monkeypatch.setattr(module.fcntl, "flock", lambda fd, op: held.append((os.fstat(fd).st_ino, op & ~fcntl.LOCK_NB)) or real(fd, op))
     call(module, "start-again")
-    assert all(op == fcntl.LOCK_EX for _inode, op in held)
-    order = [inode for inode, _op in held]
-    names = ["install/preparation.lock", "data/state/runtime-use.lock", None, "data/state/owner/owner.sock.lock",
-             "data/state/setup-preview.lock", "data/state/provider-signin.lock"]
-    assert [inode for inode, name in zip(order, names) if name] == [inodes[name] for name in names if name]
-    assert order.index(inodes["data/state/runtime-use.lock"]) + 1 == order.index(order[2]) and len(held) == 7
+    locks = [item for item in held if item[0] in inodes]
+    assert [inode for inode, _op in locks] == inodes and all(op == fcntl.LOCK_EX for _inode, op in locks)
 
 
 def test_the_locks_are_taken_before_any_deny_or_content_check(tmp_path, monkeypatch):
@@ -925,15 +911,48 @@ def test_two_runs_that_both_pass_the_checks_cannot_both_create_the_holding_folde
     assert call(module, "start-again") == {"state": "removed", "next": "prepare"}
 
 
-def test_update_lock_is_made_when_it_is_missing_and_left_when_a_check_refuses(tmp_path, monkeypatch):
+def test_a_missing_update_lock_is_never_made(tmp_path, monkeypatch):
     module, home, family, outer = world(tmp_path, monkeypatch)
     (family / "data/state/update.lock").unlink()
     put(family / "data/state/config.json", b"{}")
-    with pytest.raises(module.Refusal):
-        call(module, "start-again")
-    # The one write before the checks: an empty private file the updater would make itself.
-    assert (family / "data/state/update.lock").stat().st_size == 0
-    assert stat.S_IMODE((family / "data/state/update.lock").stat().st_mode) == 0o600
+    refuses_both(module, home, "started")
+    (family / "data/state/config.json").unlink()
+    removed_cleanly(module, home, family, outer)
+
+
+def test_a_started_team_whose_checkout_moved_past_the_receipt_is_started_not_identity_changed(tmp_path, monkeypatch):
+    module, home, family, outer = world(tmp_path, monkeypatch)
+    (family / "install/src/.git/HEAD").write_text(NEW + "\n")
+    refuses_both(module, home, "identity_changed")
+    put(family / "data/state/config.json", b"{}")
+    refuses_both(module, home, "started")
+
+
+def unfinished(module, tmp_path, monkeypatch):
+    module, home, family, outer = world(tmp_path, monkeypatch)
+    with monkeypatch.context() as patch:
+        Renames(patch, crash_after=2)
+        with pytest.raises(Crash):
+            call(module, "start-again")
+    assert sorted(os.listdir(family / "start-again")) == ["data", "staging"]
+    return module, home, family, outer
+
+
+def test_what_already_moved_into_start_again_is_checked_again(tmp_path, monkeypatch):
+    module, home, family, outer = unfinished(None, tmp_path, monkeypatch)
+    put(family / "start-again/data/state/stranger", b"?")
+    refuses_both(module, home, "unknown_content")
+    (family / "start-again/data/state/stranger").unlink()
+    bound_socket(family / "start-again/staging/sock")
+    refuses_both(module, home, "unknown_content")
+    (family / "start-again/staging/sock").unlink()
+    assert call(module, "start-again")["state"] == "removed"
+
+
+def test_a_moved_folder_on_another_device_is_refused(tmp_path, monkeypatch):
+    module, home, family, outer = unfinished(None, tmp_path, monkeypatch)
+    other_device(monkeypatch, (family / "start-again/data/state/plane").lstat().st_ino)
+    refuses_both(module, home, "unknown_content")
 
 
 # The installer's own process: its request, its one answer line and its exit codes.
@@ -946,7 +965,7 @@ home=Path(sys.argv[2]);python=Path(sys.executable).resolve()
 m.account_profile=lambda uid: home
 m.independent_python=lambda: python
 pwd.getpwuid=lambda uid: types.SimpleNamespace(pw_dir=str(home))
-raise SystemExit(m.start_again_main(sys.argv[3]))
+raise SystemExit(m.update_main(sys.argv[3]))
 '''
 
 
@@ -990,12 +1009,12 @@ def test_the_process_answers_one_canonical_line_with_the_exit_codes_of_the_other
 
 def test_an_unexpected_failure_is_answered_unavailable_and_exit_6(tmp_path, monkeypatch):
     module, home, family, outer = world(tmp_path, monkeypatch)
-    (family / "data/state").chmod(0o000)
+    (home / ".config/systemd/user").chmod(0o000)
     try:
         code, answer = invoke_start(tmp_path, home, "start-again-status", frame(source_revision=NEW, expected_uid=os.geteuid()))
     finally:
-        (family / "data/state").chmod(0o700)
-    assert code in {4, 6} and answer["state"] in {"refused", "unavailable"}
+        (home / ".config/systemd/user").chmod(0o700)
+    assert (code, answer["state"], answer["code"]) == (6, "unavailable", "unavailable")
 
 
 def test_the_shell_refuses_a_second_argument_with_the_preparations_own_names(tmp_path):

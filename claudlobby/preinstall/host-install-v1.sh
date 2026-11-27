@@ -17,14 +17,9 @@
 # the action's own keys; their answers carry the action's own names.
 # update-status asked with ingress_node_key also reads, writing nothing, whether
 # Tailscale Serve already holds exactly the route the root ingress card would set.
-# start-again-status and start-again take the same request line as prepare. They answer
-# {operation, schema_version, state, next} or {operation, schema_version, state, code}: the states
-# eligible, removed, absent, refused, busy and unavailable, and the fixed refusal codes of
-# START_AGAIN_REFUSALS. start-again removes, from a computer whose team was never started, the
-# family folder's install, data, staging, host-policy, provider-bin and provider-profile (never
-# the Mac runtime, the first-team folder, units, Tailscale, system files or anything outside the
-# family folder), and only when every name in them is one this product writes. Both are Linux
-# and Mac; start-again-status writes nothing and takes no lock exclusively.
+# start-again-status and start-again take the request line of prepare. start-again removes the
+# family folder's never-started files, refusing by default; start-again-status writes nothing
+# and takes no lock exclusively.
 operation=host-install-v1
 if [ "$#" -eq 1 ]; then
     case "$1" in
@@ -793,13 +788,13 @@ def receipt(path, expected):
     return value
 
 
-def lock_open(path, create, exclusive):
+def lock_open(path, create, exclusive, record=False):
     flags = os.O_RDWR if exclusive else os.O_RDONLY
     descriptor = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_CREAT if create else 0), 0o600)
     try:
         info, actual = os.fstat(descriptor), path.lstat()
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
-                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size
+                or stat.S_IMODE(info.st_mode) != 0o600 or (info.st_size and not record)
                 or (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino)):
             raise Refusal("existing_installation", next_step="inspect")
         try:
@@ -1665,7 +1660,8 @@ def update_main(action, fd=0):
     # this computer move it, dispatch and exit. None waits for the updater,
     # rewrites the receipt or asks anything.
     os.umask(0o077)
-    operation = UPDATE_ACTIONS[action]
+    start = action in START_AGAIN_ACTIONS
+    operation = START_AGAIN_ACTIONS[action] if start else UPDATE_ACTIONS[action]
     deadline = STARTED + BUDGETS[action]
     exit_code = 0
     def interrupted(_number, _frame):
@@ -1675,12 +1671,14 @@ def update_main(action, fd=0):
     signal.signal(signal.SIGALRM, interrupted)
     signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline - time.monotonic() - 4))
     try:
-        answer = update_execute(action, request(fd, deadline, action), deadline)
+        answer = (start_again_execute if start else update_execute)(action, request(fd, deadline, action), deadline)
     except Refusal as error:
         if error.code == "invalid_request":
             answer, exit_code = {"state": "refused", "code": "invalid_request"}, 2
-        elif error.state == "refused" and error.code in UPDATE_REFUSALS[action]:
+        elif error.state == "refused" and error.code in (START_AGAIN_REFUSALS if start else UPDATE_REFUSALS[action]):
             answer, exit_code = {"state": "refused", "code": error.code}, 4
+        elif start and (error.state, error.code) == ("busy", "preparation_in_progress"):
+            answer, exit_code = {"state": "busy", "code": error.code}, 4
         else:
             answer, exit_code = {"state": "unavailable", "code": "unavailable"}, 6
     except Exception:
@@ -1696,19 +1694,11 @@ def update_main(action, fd=0):
     return exit_code
 
 
-# Start again. Removes what a preparation and this product's first setup steps left on a
-# computer whose team was never started, and nothing else: every name in the family folder is
-# checked against an exact list built from the code that writes it, and anything else, or
-# anything that shows a team ran, is refused with nothing removed. The checks and the removal
-# run under the locks, held through the last rename. start-again-status runs the same checks
-# and writes nothing: it holds the preparation lock shared, and probes each other lock shared
-# for an instant, so it sees a holder of an exclusive lock (the owner connection, a sign-in,
-# Preview, an update) but not the shared hold of a running launcher, which only start-again,
-# taking runtime-use.lock exclusively, sees. A launcher or owner server that starts in that
-# instant is told its lock is busy, as it would be by any other holder, and starts again.
+# Start again: see the owner SSH carrier document. Checks and removal run under the locks, held
+# through the last rename. start-again-status holds the preparation lock shared and probes each
+# other lock shared for an instant, so it cannot see a running launcher's shared hold.
 START_AGAIN_ACTIONS = {"start-again-status": "host-start-again-status-v1", "start-again": "host-start-again-v1"}
-# Refused answers; a held preparation lock answers busy (preparation_in_progress). Any other
-# failure is unavailable.
+# A held preparation lock answers busy (preparation_in_progress); any other failure is unavailable.
 START_AGAIN_REFUSALS = {"account_changed", "already_current", "identity_changed", "started", "in_use",
                         "unknown_content", "first_team_not_empty"}
 # Moved into family/start-again in this order, install last: while install/ is in place the
@@ -1744,22 +1734,9 @@ STARTED_STATE = {"config.json", "selected-release.json", "migrations", "activati
 STARTED_STATE_PREFIXES = ("restored-backup", "setup-finish-")
 STARTED_UPDATER_JOB = "com.claudlobby.update."
 LINUX_UNIT_SUFFIXES = (".service", ".timer", ".socket", ".path", ".target", ".mount", ".slice")
-# The locks held, in order, after install/preparation.lock and relative to data/. Only
-# update.lock is made when it is missing: the updater makes it on first use.
-START_AGAIN_LOCKS = (("state/runtime-use.lock", False), ("state/update.lock", True),
-                     ("state/owner/owner.sock.lock", False), ("state/setup-preview.lock", False),
-                     ("state/provider-signin.lock", False))
-
-
-def _directory_of_ours(path, *, private=True):
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return False
-    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
-            or (private and stat.S_IMODE(info.st_mode) != 0o700)):
-        raise Refusal("unknown_content")
-    return True
+# The locks held after install/preparation.lock, relative to data/, when the file exists.
+START_AGAIN_LOCKS = ("state/runtime-use.lock", "state/update.lock", "state/owner/owner.sock.lock",
+                     "state/setup-preview.lock", "state/provider-signin.lock")
 
 
 def _listing(path):
@@ -1772,32 +1749,28 @@ def _listing(path):
     return os.listdir(path)
 
 
-def _hold(path, exclusive, create=False):
-    # A new opener, not lock_open: a lock file may hold bytes (owner.sock.lock a record of up to
-    # 512 bytes, provider-signin.lock an attempt id), so no size rule. The rest is lock_open's.
-    flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+def _take(path, exclusive, preparation=False):
+    # lock_open with its size rule off: owner.sock.lock and provider-signin.lock hold bytes.
     try:
-        descriptor = os.open(path, (os.O_RDWR if exclusive or create else os.O_RDONLY) | flags
-                             | (os.O_CREAT if create else 0), 0o600)
+        return lock_open(path, False, exclusive, True)
     except FileNotFoundError:
         return None
+    except Refusal as error:
+        if error.code == "preparation_in_progress":
+            raise error if preparation else Refusal("in_use") from None
+        raise Refusal("unknown_content") from None
     except OSError:
         raise Refusal("unknown_content") from None
+
+
+def _lock_folder(path, exclusive):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        info, actual = os.fstat(descriptor), path.lstat()
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
-                or stat.S_IMODE(info.st_mode) != 0o600 or (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino)):
-            raise Refusal("unknown_content")
-        try:
-            fcntl.flock(descriptor, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
-        except BlockingIOError:
-            if path.name == "preparation.lock":
-                raise Refusal("preparation_in_progress", "busy", "inspect") from None
-            raise Refusal("in_use") from None
-        return descriptor
-    except BaseException:
+        fcntl.flock(descriptor, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+    except BlockingIOError:
         os.close(descriptor)
-        raise
+        raise Refusal("preparation_in_progress", "busy", "inspect") from None
+    return descriptor
 
 
 def _member(path, kind, device):
@@ -1849,16 +1822,26 @@ def _owned_tree(root, device):
                     raise Refusal("unknown_content")
 
 
-def _owned_receipt(install, data, python, pin):
+def _recorded_ref(install, pin):
+    # Only the receipt's revision: equal to the pin, there is nothing to start again.
+    try:
+        recorded = read_json(install / "preparation.json")
+        ref = recorded.get("ref") if isinstance(recorded, dict) else None
+        found = isinstance(ref, str) and SHA.fullmatch(ref)
+    except (Refusal, OSError, UnicodeError):
+        found = False
+    if not found:
+        raise Refusal("identity_changed")
+    if ref == pin:
+        raise Refusal("already_current")
+    return ref
+
+
+def _owned_receipt(install, data, python, ref):
     # The receipt is this installer's own and the checkout is still at the commit it names. A
     # preparation that stopped before it finished (complete false) may lack or part-have both.
     try:
-        recorded = read_json(install / "preparation.json")
-        if not isinstance(recorded, dict) or not isinstance(recorded.get("ref"), str) or not SHA.fullmatch(recorded["ref"]):
-            raise Refusal("identity_changed")
-        state = receipt(install / "preparation.json", binding(install, data, recorded["ref"], python))
-        if state["ref"] == pin:
-            raise Refusal("already_current")
+        state = receipt(install / "preparation.json", binding(install, data, ref, python))
         if read_json(install / "installation.json", 4096) != {"schema": 1, "data_root": str(data)}:
             raise Refusal("identity_changed")
         try:
@@ -1870,9 +1853,7 @@ def _owned_receipt(install, data, python, pin):
         if head is not None and (head != state["ref"] if state["complete"] or SHA.fullmatch(head) else False):
             raise Refusal("identity_changed")
         return state
-    except Refusal as error:
-        raise error if error.code == "already_current" else Refusal("identity_changed") from None
-    except (OSError, UnicodeError):
+    except (Refusal, OSError, UnicodeError):
         raise Refusal("identity_changed") from None
 
 
@@ -1906,10 +1887,6 @@ def _first_team_check(home):
         raise Refusal("first_team_not_empty") from None
     if not stat.S_ISDIR(info.st_mode) or os.listdir(path):
         raise Refusal("first_team_not_empty")
-
-
-def _sync(descriptor):
-    os.fsync(descriptor)
 
 
 def _purge(parent, name, device):
@@ -1947,11 +1924,7 @@ def start_again_execute(action, value, deadline):
         python = independent_python()
         family = home / ".local/share/claudlobby-browser"
         for path in (home / ".local", home / ".local/share", family):
-            try:
-                found = directory(path, private=path == family)
-            except Refusal:
-                raise Refusal("unknown_content") from None
-            if not found:
+            if not directory(path, private=path == family):
                 return {"state": "absent", "next": "prepare"}
         if platform.system() == "Darwin" and admitted_darwin_profile(value["expected_uid"]).root != family / "runtime/profile":
             raise Refusal("account_changed")
@@ -1964,15 +1937,11 @@ def start_again_execute(action, value, deadline):
         partial = "start-again" in top
         if partial:
             # Looked for first: after install/ has moved, nothing else shows a computer was prepared.
-            _directory_of_ours(unfinished)
+            directory(unfinished, private=True)
             if unfinished.lstat().st_dev != device:
                 raise Refusal("unknown_content")
-            holder = os.open(unfinished, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            holder = _lock_folder(unfinished, write)
             holds.append(holder)
-            try:
-                fcntl.flock(holder, (fcntl.LOCK_EX if write else fcntl.LOCK_SH) | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise Refusal("preparation_in_progress", "busy", "inspect") from None
             inside = set(os.listdir(unfinished))
             if inside - set(START_AGAIN_ORDER) or inside & top:
                 raise Refusal("unknown_content")
@@ -1988,29 +1957,30 @@ def start_again_execute(action, value, deadline):
             install, data = family / "install", family / "data"
             # Under the locks, in this order: preparation, runtime use, update, the owner
             # connection, Preview, a sign-in. Held through the last rename.
-            held = _hold(install / "preparation.lock", write)
+            held = _take(install / "preparation.lock", write, True)
             if held is None:
                 raise Refusal("identity_changed")
             holds.append(held)
             base = data if "data" in top else unfinished / "data" if partial and "data" in inside else None
             if base is not None:
-                _directory_of_ours(base)
-                for relative, create in START_AGAIN_LOCKS:
+                directory(base, private=True)
+                for relative in START_AGAIN_LOCKS:
                     parent = base
                     for part in relative.split("/")[:-1]:
                         parent = parent / part
-                        if not _directory_of_ours(parent):
+                        if not directory(parent, private=True):
                             break
                     else:
-                        found = _hold(base / relative, write, create and write)
+                        found = _take(base / relative, write)
                         if found is not None and write:
                             holds.append(found)
                         elif found is not None:
                             os.close(found)
-            state = _owned_receipt(install, data, python, value["source_revision"])
+            ref = _recorded_ref(install, value["source_revision"])
+            _started_check(family, home)
+            state = _owned_receipt(install, data, python, ref)
             if state["complete"] and (base is None or not os.path.lexists(base / "state/runtime-use.lock")):
                 raise Refusal("identity_changed")
-            _started_check(family, home)
             _first_team_check(home)
             for name in sorted(top & components):
                 _member(family / name, COMPONENTS[name], device)
@@ -2021,61 +1991,36 @@ def start_again_execute(action, value, deadline):
                 os.mkdir(unfinished, 0o700)
             except FileExistsError:
                 raise Refusal("preparation_in_progress", "busy", "inspect") from None
-            holder = os.open(unfinished, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            holds.append(holder)
             try:
-                fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise Refusal("preparation_in_progress", "busy", "inspect") from None
-        parent = os.open(family, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+                holder = _lock_folder(unfinished, True)
+            except BaseException:
+                try:
+                    os.rmdir(unfinished)
+                except OSError:
+                    pass
+                raise
+            holds.append(holder)
+        parent = os.open(family, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         holds.append(parent)
-        _sync(parent)
+        os.fsync(parent)
         for name in START_AGAIN_ORDER:
             if name in top:
                 os.rename(name, name, src_dir_fd=parent, dst_dir_fd=holder)
-                _sync(holder)
-                _sync(parent)
+                os.fsync(holder)
+                os.fsync(parent)
         for name in START_AGAIN_ORDER:
             if name in top or partial and name in inside:
                 _purge(holder, name, device)
         os.rmdir("start-again", dir_fd=parent)
-        _sync(parent)
+        os.fsync(parent)
         return {"state": "removed", "next": "prepare"}
+    except Refusal as error:
+        if error.code == "existing_installation":
+            raise Refusal("unknown_content") from None
+        raise
     finally:
         for descriptor in reversed(holds):
             os.close(descriptor)
-
-
-def start_again_main(action, fd=0):
-    os.umask(0o077)
-    operation = START_AGAIN_ACTIONS[action]
-    deadline = STARTED + BUDGETS[action]
-    exit_code = 0
-    def interrupted(_number, _frame):
-        raise Refusal("unavailable", "unavailable", "inspect", 6)
-    signal.signal(signal.SIGTERM, interrupted)
-    signal.signal(signal.SIGINT, interrupted)
-    signal.signal(signal.SIGALRM, interrupted)
-    signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline - time.monotonic() - 4))
-    try:
-        answer = start_again_execute(action, request(fd, deadline), deadline)
-    except Refusal as error:
-        if error.code == "invalid_request":
-            answer, exit_code = {"state": "refused", "code": "invalid_request"}, 2
-        elif error.state == "refused" and error.code in START_AGAIN_REFUSALS:
-            answer, exit_code = {"state": "refused", "code": error.code}, 4
-        elif error.state == "busy" and error.code == "preparation_in_progress":
-            answer, exit_code = {"state": "busy", "code": error.code}, 4
-        else:
-            answer, exit_code = {"state": "unavailable", "code": "unavailable"}, 6
-    except Exception:
-        answer, exit_code = {"state": "unavailable", "code": "unavailable"}, 6
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-    output = (json.dumps({"schema_version": 1, "operation": operation, **answer}, sort_keys=True,
-                         separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
-    sys.stdout.buffer.write(output)
-    return exit_code
 
 
 def main(action, fd=0):
@@ -2112,8 +2057,8 @@ def main(action, fd=0):
 
 
 if __name__ == "__main__":
-    raise SystemExit(update_main(sys.argv[1]) if sys.argv[1] in UPDATE_ACTIONS
-                     else start_again_main(sys.argv[1]) if sys.argv[1] in START_AGAIN_ACTIONS else main(sys.argv[1]))
+    raise SystemExit(update_main(sys.argv[1]) if sys.argv[1] in UPDATE_ACTIONS or sys.argv[1] in START_AGAIN_ACTIONS
+                     else main(sys.argv[1]))
 # END EMBEDDED PYTHON
 FIXED_OPERATION_PYTHON
 if [ "$(/usr/bin/uname -s 2>/dev/null)" = Darwin ]; then

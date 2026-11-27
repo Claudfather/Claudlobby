@@ -537,20 +537,26 @@ What is kept: the first-team folder, units, the Mac `runtime/` (Mac only), and o
 team account, linger, System tools, the Serve route and root receipts.
 
 `start-again-status` writes nothing and takes no lock exclusively. It holds the preparation
-lock shared, and probes each other lock shared for an instant. It therefore sees a holder of
-an exclusive lock (the owner connection, a sign-in, Preview, an update) but not a running
-launcher, which holds `runtime-use.lock` shared and is seen only by `start-again`, which takes
-it exclusively. A launcher or an owner server that starts in that instant is told its lock is
-busy, as by any other holder, and starts again. `start-again` itself makes `update.lock` when
-it is missing, an empty private file the updater makes on first use, even when a later check
-refuses.
+lock shared, and probes each other lock shared for an instant. A launcher takes
+`runtime-use.lock` shared, so a probe never disturbs it, but the status cannot see a running
+launcher: only `start-again`, which takes that lock exclusively, does. What a probe can disturb,
+for that instant, is a process that takes a lock exclusively without retrying: an owner server
+("already has a running server") and Launch ("another update is running"). Preview and the
+sign-in lease retry 50 times at 10 ms. `start-again` creates no file: a missing `update.lock`
+is skipped, because the exclusive `runtime-use.lock` already shuts out every process that makes
+it before a Launch, and a refusal leaves the computer byte-identical.
+
+The carrier must give `start-again` a long budget of at least 130 seconds (the installer's own
+is 120); the default 20 seconds would cut a slow delete. That is safe, since a second press
+finishes it. `start-again-status` fits the short budget (the installer's own is 15 seconds).
 
 On a Mac, the guide holds no lock between its operations: close other setup tabs before
-pressing Start again. On a Mac, a pin that changes the managed runtime descriptor makes these
-actions unreachable (the shell's `runtime_not_admitted` answers, as for `prepare`): that is
-out of scope here. Update operations remain Linux only; the website carrier admits these two
-actions on both systems, with the Mac request shape and `/bin/` prefix. They are inert until
-the website admits them, and gated on the owner's decision.
+pressing Start again. When the managed runtime is not admitted the shell answers `unavailable`
+(exit 6) for these actions, not `runtime_not_admitted`; a pin that changes the Mac runtime
+descriptor therefore makes them unreachable on a Mac, which is out of scope here. Update
+operations remain Linux only. The website carrier must admit the two actions on both systems,
+with the Mac request shape and the `/bin/` prefix; that is future work. Until then they are
+inert, and gated on the owner's decision.
 
 ## Launch
 
