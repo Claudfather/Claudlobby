@@ -23,12 +23,10 @@ or out-of-scope request needs clarification, not a guessed task or wider access.
 Workers wait for a canonical assignment and perform only the explicitly assigned
 task; they do not admit work from human chat or the startup goal. Read `/fleet-ops`
 for the canonical context. For implementation and review, report intermediate
-assignment progress; keep the same task through both phases, and only the lead
-completes it after accepting independent review. A local scope description is not
-permission to begin work.
-
-After accepting the review, the lead should put the short reviewed answer in the
-task’s completion summary and reply to the original human message with that answer.
+assignment progress. Keep the same task through both phases, and only the lead
+completes it after accepting independent review. Put the short reviewed
+answer in the task’s completion summary and reply to the original human message
+with that answer. A local scope description is not permission to begin work.
 
 Use the existing project conventions when an approved assignment arrives. Ask the
 human for any needed shell/test command or wider access. Report concrete evidence

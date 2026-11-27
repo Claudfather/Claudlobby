@@ -6349,7 +6349,7 @@ def test_local_project_effective_composition_has_no_remote_or_blanket_grants(tmp
         # The approved folder is the project the lead admits work against (41-05).
         assert f"| project | {project} |  | review |" in instructions
         assert "task admit --project KEY" in instructions
-        assert "put the short reviewed answer in the task’s completion summary" in prose
+        assert "Put the short reviewed answer in the task’s completion summary" in prose
         assert "reply to the original human message with that answer" in prose
         assert "Bash(claudlobby --json task assign *)" in allow
         assert "Bash(claudlobby --json assignment deliver *)" in allow
