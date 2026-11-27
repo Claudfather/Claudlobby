@@ -6348,6 +6348,7 @@ def test_local_project_effective_composition_has_no_remote_or_blanket_grants(tmp
         assert "The ack precedes the substance" in instructions
         # The approved folder is the project the lead admits work against (41-05).
         assert f"| project | {project} |  | review |" in instructions
+        assert "task admit --project KEY" in instructions
         assert "Bash(claudlobby --json task assign *)" in allow
         assert "Bash(claudlobby --json assignment deliver *)" in allow
     else:
