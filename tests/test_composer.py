@@ -6343,14 +6343,14 @@ def test_local_project_effective_composition_has_no_remote_or_blanket_grants(tmp
     assert "If a human request already references a task, reuse that task" in prose
     assert "retain the original task and request UUID" in prose
     assert "only the lead completes it after accepting independent review" in prose
+    assert ("The lead puts the short reviewed answer in the task’s completion summary "
+            "and replies to the original human message with that answer.") in prose
     if bot_id == "lead":
         assert "explicit delivered human request" in bot.mission
         assert "The ack precedes the substance" in instructions
         # The approved folder is the project the lead admits work against (41-05).
         assert f"| project | {project} |  | review |" in instructions
         assert "task admit --project KEY" in instructions
-        assert ("The lead puts the short reviewed answer in the task’s completion summary "
-                "and replies to the original human message with that answer.") in prose
         assert "Bash(claudlobby --json task assign *)" in allow
         assert "Bash(claudlobby --json assignment deliver *)" in allow
     else:
