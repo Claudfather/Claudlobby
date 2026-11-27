@@ -535,10 +535,10 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   }
   function renderDetail(task, boardOnly, unavailable = null) {
     paintAccess();
+    const permissionStatus = taskPermissionSummary(task);
     const content = $("task-detail-content");
     const lastEvent = task.last_event || task.history?.at(-1);
     const assignment = task.current_assignment;
-    const permissionStatus = taskPermissionSummary(task);
     content.innerHTML = `<p class="eyebrow">${esc(roomLabel(task.fleet || "Team not recorded"))} · TASK</p>
       <h2 id="task-detail-title">${esc(task.title || "Recorded task")}</h2>
       <p class="task-state"><b>${esc(task.state || "State unknown")}</b></p>
