@@ -27,6 +27,9 @@ assignment progress; keep the same task through both phases, and only the lead
 completes it after accepting independent review. A local scope description is not
 permission to begin work.
 
+After accepting the review, the lead should put the short reviewed answer in the
+task’s completion summary and reply to the original human message with that answer.
+
 Use the existing project conventions when an approved assignment arrives. Ask the
 human for any needed shell/test command or wider access. Report concrete evidence
 and blockers through the canonical fleet operations without assuming a PR exists.
