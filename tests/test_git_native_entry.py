@@ -4,8 +4,10 @@ import contextlib
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
+import sysconfig
 import time
 
 import pytest
@@ -13,7 +15,7 @@ import pytest
 from claudlobby.installation import install_launcher, native_start_fence
 from claudlobby.runtime_admission import wrap_unit_argv
 from tests.conftest import constructed_env
-from tests.test_package_resources import _source_installation
+from tests.test_package_resources import REPO, _run, _source_installation
 
 
 def test_launcher_setup_refuses_wrong_record_before_creating_coordination_state(tmp_path):
@@ -224,6 +226,70 @@ def test_lock_covers_cli_lifetime_but_not_native_service_lifetime(native, entry)
             process.communicate()
             raise
     assert process.returncode == 0, stdout + stderr
+
+
+def test_a_scheduled_pulse_counts_its_cap_from_its_units_start(native):
+    """A one-shot's command counts its time limit from its unit's start: the native
+    entry stamps that start for the process it becomes, and the CLI it execs keeps
+    its pid. Here the CLI reaches the fleet pulse's own sweep only after a slow
+    start, as on a loaded host, with a cap that would outlast the run, so the run's
+    ceiling, counted from the unit's start, is what stops the sweep."""
+    installation, _, snapshot, save, _, _ = native
+    startup, ceiling = 2, 5
+    # The installation's environment, as the stable launcher's own test builds it: a venv
+    # that reuses the installed test dependencies for the pulse's imports.
+    _run([sys.executable, "-m", "venv", "--without-pip", installation.environment], installation.data_root)
+    purelib = Path(_run([installation.environment / "bin/python", "-c",
+                        "import sysconfig; print(sysconfig.get_path('purelib'))"], installation.data_root).strip())
+    (purelib / "test-dependencies.pth").write_text(sysconfig.get_path("purelib") + "\n")
+    summary = installation.data_root / "pulse-summary.txt"
+    (installation.source / "claudlobby/__main__.py").write_text(f"""import os, pathlib, time
+import claudlobby
+claudlobby.__path__.append({str(REPO / "claudlobby")!r})  # the pulse and its imports, from this checkout
+from claudlobby import fleet_pulse
+
+
+def main(argv):
+    time.sleep({startup})
+    fleet_pulse.sweep_cap = lambda configured, load1, cpus: (
+        ({ceiling} if load1 == float("inf") else 60), "a test cap")
+    try:
+        fleet_pulse._sweep(["/bin/sh", "-c", "sleep 60"], dict(os.environ),
+                           summary_path=pathlib.Path({str(summary)!r}))
+    except fleet_pulse.FleetPulseError as exc:
+        print(exc)
+        return 8
+    return 0
+""")
+    command = (str(installation.cli), "--root", str(installation.data_root), "--version")
+    item = snapshot["units"][0]
+    argv = wrap_unit_argv(item["environment"], unit="example-job", phase="producers", mode="oneshot", argv=command)
+    item["admission"].update(argv=list(argv), command=list(command))
+    save()
+    outcome = subprocess.run(argv, env=constructed_env(**item["environment"]), cwd=installation.data_root,
+                             capture_output=True, text=True, timeout=60)
+    assert outcome.returncode == 8, outcome.stdout + outcome.stderr
+    began = re.search(rf"the sweep began (\d+) s into a run capped at {ceiling} s", outcome.stdout)
+    assert began and int(began.group(1)) >= startup, outcome.stdout + outcome.stderr
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the stamp reads its start from /proc")
+def test_the_stamp_names_when_its_process_started_not_when_it_stamped():
+    """The native unit entry stamps its process's start, which the service manager set
+    when it started the unit's command, not the moment the entry reached the stamp. A
+    process that stamps 2 s after it started still names its start, to within the
+    kernel's clock tick and a scheduling delay."""
+    late = 2
+    code = ("import sys, time; time.sleep(float(sys.argv[2])); sys.path.insert(0, sys.argv[1]); "
+            "from claudlobby.installation import _unit_started; print(_unit_started())")
+    before = time.monotonic()
+    child = subprocess.Popen([sys.executable, "-I", "-c", code, str(REPO), str(late)],
+                             stdout=subprocess.PIPE, text=True)
+    spawned = time.monotonic()
+    stdout, _ = child.communicate(timeout=60)
+    pid, started = stdout.split()
+    assert int(pid) == child.pid, stdout
+    assert before - 0.5 < float(started) < spawned + 0.5, (before, stdout, spawned)
 
 
 @pytest.fixture

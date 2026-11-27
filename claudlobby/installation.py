@@ -18,6 +18,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
+
+#: A scheduled one-shot's start, which the native unit entry passes to the command it
+#: becomes: that process's pid and its start on the monotonic clock (_unit_started).
+UNIT_STARTED_ENV = "CLAUDLOBBY_UNIT_STARTED"
 
 
 class InstallationError(ValueError):
@@ -445,6 +450,21 @@ def _run_git_unit(installation, argv, environment):
         return 0
 
 
+def _unit_started() -> str:
+    """UNIT_STARTED_ENV's value: this pid, and when this process started on the
+    monotonic clock, read from procfs where there is one, else now. The service
+    manager starts a unit's command as this process, and exec keeps its pid."""
+    now = time.monotonic()
+    try:
+        with open("/proc/self/stat") as proc_stat:
+            ticks = int(proc_stat.read().rsplit(")", 1)[1].split()[19])
+        with open("/proc/uptime") as uptime:
+            age = max(0.0, float(uptime.read().split()[0]) - ticks / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError):
+        age = 0.0
+    return f"{os.getpid()} {now - age:.3f}"
+
+
 def _exec_git_unit(installation, target, environment):
     fd = _native_lock(installation)
     try:
@@ -452,6 +472,10 @@ def _exec_git_unit(installation, target, environment):
         _committed_unit(installation, target, environment)
         clean = {key: value for key, value in environment.items()
                  if key not in {"BASH_ENV", "ENV", "PYTHONPATH", "PYTHONHOME"} and not key.startswith("BASH_FUNC_")}
+        if target.mode == "oneshot":
+            # A scheduled command may count a time limit from its unit's start, as
+            # the fleet pulse's cap does (claudlobby/fleet_pulse.py _run_started).
+            clean[UNIT_STARTED_ENV] = _unit_started()
         if target.command[0] == str(installation.cli):
             python = installation.environment / "bin/python"
             arguments = _bound_arguments(installation, list(target.command[1:]))

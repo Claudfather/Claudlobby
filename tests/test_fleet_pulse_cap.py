@@ -1,11 +1,13 @@
 """The fleet pulse's time cap (#2059, a stopgap for #907's sweep cost).
 
 The cap is fleet.yaml's ``fleet_pulse.timeout_s``, clamped to its validated range,
-else 120 s scaled by load per CPU up to 240 s, under the default 300 s pulse
+else 120 s scaled by load per CPU up to 233 s, under the default 300 s pulse
 cadence so an activation finds the shared lock free between ticks. A scheduled run
-ends by the largest cap, counted from its unit's start (#2347). A sweep that reaches
-its cap gets SIGTERM, then SIGKILL, and leaves a summary that says so, with the last
-complete one kept beside it. The unit's own limit stops a run that cannot stop itself.
+ends by the largest cap, counted from its unit's start (#2347), which the native unit
+entry passes to the command it becomes; that path's own test runs through the entry
+(tests/test_git_native_entry.py). A sweep that reaches its cap gets SIGTERM, then
+SIGKILL, and leaves a summary that says so, with the last complete one kept beside
+it. The unit's own limit stops a run that cannot stop itself.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from claudlobby.config import FleetPulseConfig, _coerce_fleet_pulse
     [
         (None, 0.5, 4, 120),  # an idle host keeps the old cap
         (None, 6.0, 4, 180),  # scaled by load per CPU
-        (None, 74.0, 4, 240),  # the heaviest measured load, at the ceiling
+        (None, 74.0, 4, 233),  # the heaviest measured load, at the ceiling
         (450, 74.0, 4, 450),  # fleet.yaml wins over the load
         (5, 0.5, 4, 30),  # and is clamped to its validated range
         (7200, 0.5, 4, 3600),
@@ -42,14 +44,20 @@ def test_the_cap_is_configured_or_scaled_with_load(configured, load1, cpus, cap)
 
 
 def test_the_units_limit_keeps_every_run_inside_the_sealed_bound():
-    """The stop after the cap fits inside the unit's own limit (TimeoutStartSec=).
-    Past it systemd waits UNIT_STOP_S in each of at most four kill phases, and each
-    of its five timers can fire up to 0.25 s late (sd-event's default accuracy), so
-    a run still ends by 260 s: the 240 s ceiling, the 10 s grace and 10 s for the CLI.
+    """The unit's own limit (TimeoutStartSec=) is the run's ceiling plus the stop's
+    budget: the grace, the reap, and EXIT_S for the summary, the CLI's stop line and
+    its interpreter's exit, which on a loaded host takes seconds after that line.
+    Past the limit systemd waits UNIT_STOP_S in each of at most four kill phases,
+    and each of its five timers can fire up to 0.25 s late (sd-event's default
+    accuracy), so a run still ends by 260 s. The default limit stays 254 s.
     """
     limit = fleet_pulse.unit_time_limit(None)
-    ceiling = fleet_pulse.largest_cap(None)
-    assert ceiling + fleet_pulse.TERM_GRACE_S + fleet_pulse.REAP_WAIT_S < limit
+    assert limit == fleet_pulse.UNIT_LIMIT_S == 254  # the composed unit keeps its limit
+    assert fleet_pulse.UNIT_MARGIN_S == (
+        fleet_pulse.TERM_GRACE_S + fleet_pulse.REAP_WAIT_S + fleet_pulse.EXIT_S
+    )
+    # EXIT_S leaves room for the main process's exit after the stop line.
+    assert fleet_pulse.EXIT_S > 8
     assert limit + 4 * fleet_pulse.UNIT_STOP_S + 5 * 0.25 <= 260
     assert fleet_pulse.unit_time_limit(600) == 600 + fleet_pulse.UNIT_MARGIN_S
     assert fleet_pulse.unit_time_limit(5) == 30 + fleet_pulse.UNIT_MARGIN_S
@@ -62,6 +70,14 @@ def _cap(monkeypatch, cap, ceiling=None):
         return (ceiling if ceiling and load1 == float("inf") else cap), "a test cap"
 
     monkeypatch.setattr(fleet_pulse, "sweep_cap", stub)
+
+
+def _unit_started_at(monkeypatch, seconds_ago):
+    """Stamp this process as the native unit entry does, for a unit that started
+    seconds_ago, and return that start on the monotonic clock."""
+    started = time.monotonic() - seconds_ago
+    monkeypatch.setenv("CLAUDLOBBY_UNIT_STARTED", f"{os.getpid()} {started:.3f}")
+    return started
 
 
 def _time_out(
@@ -116,20 +132,17 @@ def test_a_summary_that_cannot_be_written_still_reports_a_timeout(
 
 
 def test_the_cap_counts_from_the_units_start(tmp_path, monkeypatch):
-    """Time the run spent before its sweep (waiting out an activation's lock,
-    starting two interpreters on a stalled host) counts against its ceiling: the
-    ceiling bounds the unit's run, which is what the cadence and `host activate`
-    see."""
-    started = time.monotonic() - 2
-    monkeypatch.setenv("CLAUDLOBBY_UNIT_STARTED", f"{os.getppid()} {started:.3f}")
+    """Time the run spent before its sweep (starting two interpreters and the CLI on
+    a stalled host) counts against its ceiling: the ceiling bounds the unit's run,
+    which is what the cadence and `host activate` see."""
+    started = _unit_started_at(monkeypatch, 2)
     error = _time_out(tmp_path / "pulse-summary.txt", monkeypatch, cap=3)
     assert time.monotonic() - started < 3 + 1, "the sweep got its whole cap"
     assert "the sweep began 2 s into a run capped at 3 s" in str(error)
 
 
 def test_a_sweep_keeps_its_own_cap_while_the_run_has_room(tmp_path, monkeypatch):
-    started = time.monotonic() - 5
-    monkeypatch.setenv("CLAUDLOBBY_UNIT_STARTED", f"{os.getppid()} {started:.3f}")
+    _unit_started_at(monkeypatch, 5)
     error = _time_out(tmp_path / "pulse-summary.txt", monkeypatch, cap=1, ceiling=60)
     assert "after 1 s of its 1 s cap" in str(error), error
     assert "began 5 s into a run capped at 60 s" in str(error), error
@@ -137,8 +150,7 @@ def test_a_sweep_keeps_its_own_cap_while_the_run_has_room(tmp_path, monkeypatch)
 
 def test_a_run_with_no_time_left_starts_no_sweep(tmp_path, monkeypatch):
     _cap(monkeypatch, 1, ceiling=3)
-    started = time.monotonic() - 5
-    monkeypatch.setenv("CLAUDLOBBY_UNIT_STARTED", f"{os.getppid()} {started:.3f}")
+    _unit_started_at(monkeypatch, 5)
     swept = tmp_path / "swept"
     with pytest.raises(fleet_pulse.FleetPulseError) as failure:
         fleet_pulse._sweep(
@@ -180,25 +192,38 @@ def test_the_stop_is_bounded_when_output_is_held_outside_the_sweeps_group(
 @pytest.mark.parametrize(
     "stamp,counts",
     [
-        ("{parent} {started}", True),  # from this CLI's parent, the unit's admission
-        ("{other} {started}", False),  # inherited from further up: another run's
-        ("{parent} {future}", False),
-        ("{parent} soon", False),
+        ("{own} {started}", True),  # stamped for this process: the entry exec'd into it
+        ("{parent} {started}", False),  # inherited from the parent: another run's
+        ("{own} {future}", False),
+        ("{own} soon", False),
         ("", False),
     ],
 )
-def test_only_the_parent_units_start_counts(stamp, counts, monkeypatch):
+def test_only_the_stamp_for_this_process_counts(stamp, counts, monkeypatch):
     now = time.monotonic()
     monkeypatch.setenv(
         "CLAUDLOBBY_UNIT_STARTED",
         stamp.format(
+            own=os.getpid(),
             parent=os.getppid(),
-            other=os.getppid() + 1,
             started=f"{now - 5:.3f}",
             future=f"{now + 60:.3f}",
         ),
     )
     assert (fleet_pulse._run_started() < now - 4) == counts
+
+
+def test_the_stop_writes_its_summary_before_the_journals_copy(tmp_path, monkeypatch):
+    """The sweep's warnings go on to the unit's journal after the stop, and a slow
+    journal can hold that copy past the unit's limit; the summary that records the
+    stop is already written by then."""
+    summary = tmp_path / "pulse-summary.txt"
+    seen = []
+    monkeypatch.setattr(
+        fleet_pulse, "_forward", lambda warnings: seen.append(summary.read_text())
+    )
+    _time_out(summary, monkeypatch)
+    assert len(seen) == 1 and seen[0].startswith("TIMED OUT"), seen
 
 
 def test_fleet_yaml_carries_timeout_s_and_keeps_it_off_the_unit_environment():

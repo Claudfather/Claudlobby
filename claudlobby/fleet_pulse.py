@@ -16,8 +16,9 @@ import time
 
 from .config import FLEET_PULSE_TIMEOUT_RANGE
 from .context import native_environment
+from .installation import UNIT_STARTED_ENV
 from .operation_context import resolve_operation_scope
-from .runtime_admission import UNIT_STARTED_ENV, mutation_admission, runtime_release_id, runtime_provenance, bound_runtime_release
+from .runtime_admission import mutation_admission, runtime_release_id, runtime_provenance, bound_runtime_release
 
 
 class FleetPulseError(RuntimeError):
@@ -42,12 +43,18 @@ class FleetPulseResult:
 # its stop under the default 300 s pulse cadence. Each native entry holds the
 # installation runtime-use lock through its command; the updater waits for
 # current readers and independently rechecks quiet before changing source.
+# A scheduled run's ceiling is the largest cap, counted from its unit's start; the
+# unit's TimeoutStartSec= adds the stop's budget, UNIT_MARGIN_S: the grace for the
+# sweep's group (bash runs its EXIT traps), the reap, and EXIT_S for the summary and
+# the CLI's exit on a loaded host. UNIT_LIMIT_S is that limit at the default ceiling.
 # UNIT_STOP_S is the unit's TimeoutStopSec=, waited per systemd kill phase, four at most.
 DEFAULT_CAP_S = 120
-MAX_CAP_S = 240
 TERM_GRACE_S = 10
 REAP_WAIT_S = 1
-UNIT_MARGIN_S = 14
+EXIT_S = 10
+UNIT_MARGIN_S = TERM_GRACE_S + REAP_WAIT_S + EXIT_S
+UNIT_LIMIT_S = 254
+MAX_CAP_S = UNIT_LIMIT_S - UNIT_MARGIN_S
 UNIT_STOP_S = 1
 
 
@@ -68,18 +75,18 @@ def largest_cap(configured: int | None) -> int:
 
 
 def unit_time_limit(configured: int | None) -> int:
-    """The pulse unit's TimeoutStartSec=: the run's ceiling plus the grace, the
-    reap and the summary."""
+    """The pulse unit's TimeoutStartSec=: the run's ceiling plus the stop's budget."""
     return largest_cap(configured) + UNIT_MARGIN_S
 
 
 def _run_started() -> float:
-    """When this run started on the monotonic clock: its unit's start, which runtime
-    admission passes to its own child (the scheduled CLI), else now."""
+    """When this run started on the monotonic clock: its unit's start, which the
+    native unit entry passes to the command it becomes, this very process
+    (claudlobby/installation.py _exec_git_unit), else now."""
     now = time.monotonic()
-    parent, _, started = os.environ.get(UNIT_STARTED_ENV, "").partition(" ")
+    pid, _, started = os.environ.get(UNIT_STARTED_ENV, "").partition(" ")
     with contextlib.suppress(ValueError):
-        if int(parent) == os.getppid() and float(started) <= now:
+        if int(pid) == os.getpid() and float(started) <= now:
             return float(started)
     return now
 
@@ -127,24 +134,28 @@ def _record_timeout(path: Path, stopped: str, tail: str) -> None:
         raise
 
 
+def _tail(warnings) -> str:
+    """The last 4 KiB of the sweep's warnings."""
+    warnings.seek(0, os.SEEK_END)
+    warnings.seek(max(warnings.tell() - 4096, 0))
+    return warnings.read().decode("utf-8", "replace")
+
+
+def _forward(warnings) -> None:
+    """Forward the sweep's warnings to stderr, the unit's journal."""
+    warnings.seek(0)
+    stream = getattr(sys.stderr, "buffer", None)
+    if stream is not None:
+        shutil.copyfileobj(warnings, stream)
+    else:
+        for chunk in iter(lambda: warnings.read(8192), b""):
+            sys.stderr.write(chunk.decode("utf-8", "replace"))
+
+
 def _sweep(command: list[str], env: dict[str, str], *, timeout_s: int | None = None,
            summary_path: Path) -> tuple[str, str, int]:
     """Bound the private sweep by its cap, cut short only so the run ends by its
     ceiling, and preserve its journal warnings."""
-    def drain(warnings) -> str:
-        """Forward the warnings to stderr and return their last 4 KiB."""
-        warnings.seek(0, os.SEEK_END)
-        warnings.seek(max(warnings.tell() - 4096, 0))
-        tail = warnings.read().decode("utf-8", "replace")
-        warnings.seek(0)
-        stream = getattr(sys.stderr, "buffer", None)
-        if stream is not None:
-            shutil.copyfileobj(warnings, stream)
-        else:
-            for chunk in iter(lambda: warnings.read(8192), b""):
-                sys.stderr.write(chunk.decode("utf-8", "replace"))
-        return tail
-
     cap, why = sweep_cap(timeout_s, os.getloadavg()[0], os.cpu_count() or 1)
     ceiling, started, now = largest_cap(timeout_s), _run_started(), time.monotonic()
     timeout = min(cap, started + ceiling - now)
@@ -159,16 +170,19 @@ def _sweep(command: list[str], env: dict[str, str], *, timeout_s: int | None = N
             stdout, _ = child.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             _stop(child)
-            tail = drain(warnings)
             stopped = f"after {timeout:.0f} s of its {cap} s cap ({why})"
             try:
-                _record_timeout(summary_path, stopped, tail)
+                # The summary before the journal's copy of the warnings, which a slow
+                # journal can hold past the unit's limit.
+                _record_timeout(summary_path, stopped, _tail(warnings))
                 where = f"its summary records the stop: {summary_path}"
             except OSError as err:
                 where = f"its summary was not written ({err}); inspect its events"
+            _forward(warnings)
             raise FleetPulseError(f"private fleet pulse timed out {stopped}; {where}",
                                   code="timeout", effect_attempted=True) from exc
-        tail = drain(warnings)
+        tail = _tail(warnings)
+        _forward(warnings)
     return stdout.decode("utf-8", "replace"), tail, child.returncode
 
 
