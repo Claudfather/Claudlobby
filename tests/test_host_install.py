@@ -4,6 +4,7 @@ import builtins
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import subprocess
@@ -839,18 +840,28 @@ def test_darwin_policy_embeddings_and_existing_python_selector_are_exact():
         assert path.read_text().split(begin, 1)[1].split(end, 1)[0] == selector
 
 
-def test_darwin_admission_prefix_runs_alone_and_defines_what_the_scripts_call():
+def test_darwin_admission_prefix_runs_alone_and_defines_what_the_scripts_call(monkeypatch):
     canonical = (ROOT / "claudlobby/darwin_runtime.py").read_text()
     marker = "# END DARWIN RUNTIME ADMISSION\n"
     assert canonical.count(marker) == 1
     prefix = canonical.split(marker, 1)[0] + marker
     alone, whole = types.ModuleType("admission_alone"), types.ModuleType("admission_whole")
-    sys.modules[alone.__name__] = alone
+    monkeypatch.setitem(sys.modules, alone.__name__, alone)
     exec(compile(prefix, "<admission prefix>", "exec"), alone.__dict__)
     exec(compile(canonical, "<full runtime>", "exec"), whole.__dict__)
-    # Every name the installer and the owner guide use on the embedded module.
-    for name in ("admit_profile", "environment", "RuntimeRefusal"):
-        assert callable(getattr(alone, name))
+    # Every name the installer and the owner guide use on the embedded module, read
+    # from the scripts themselves: `_darwin_runtime().<name>` and `<var>.<name>` for a
+    # variable bound to `_darwin_runtime()`. A call added later to a function that
+    # lives after the marker fails here, not only on a Mac.
+    called = set()
+    for script in (SCRIPT, ROOT / "claudlobby/preinstall/owner-guide-v1.sh"):
+        text = script.read_text()
+        called |= set(re.findall(r"_darwin_runtime\(\)\.(\w+)", text))
+        for var in set(re.findall(r"(\w+) = _darwin_runtime\(\)", text)):
+            called |= set(re.findall(rf"\b{var}\.(\w+)", text))
+    assert {"admit_profile", "environment", "RuntimeRefusal"} <= called
+    for name in sorted(called):
+        assert hasattr(alone, name), name
     # Nothing the admission path needs lives after the marker: every global the
     # prefix's functions read is defined by the prefix alone.
     tree = ast.parse(prefix)
