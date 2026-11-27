@@ -528,9 +528,15 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       text = prose(task.history?.find(same));
     }
     if (!text) return `<p class="detail-empty">${closed ? "Result" : "Update"} text is not available in this snapshot. Open task details below to inspect the recorded reports and history.</p>`;
-    if (text.length <= 1000) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
+    // Older browsers can show the full bounded record when they cannot find a grapheme boundary.
+    let excerpt = text;
+    if (text.length > 1000 && typeof Intl.Segmenter === "function") {
+      const characters = new Intl.Segmenter().segment(text);
+      excerpt = Array.from(characters, part => part.segment).slice(0, 1000).join("");
+    }
+    if (excerpt === text) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
     return `<p class="note">${closed ? "Result" : "Update"} excerpt (first 1,000 characters).</p>
-      <pre class="task-record-body task-result">${esc(text.slice(0, 1000))}…</pre>
+      <pre class="task-record-body task-result">${esc(excerpt)}…</pre>
       <details class="task-record-details"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body">${esc(text)}</pre></details>`;
   }
   function renderDetail(task, boardOnly, unavailable = null) {
