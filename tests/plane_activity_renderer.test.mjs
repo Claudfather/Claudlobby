@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { taskPermissionSummary } from '../claudlobby/plane/ui/permission-panel.js';
 
 const source = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
 
@@ -68,7 +69,8 @@ test('connected directory separates recorded activity from live evidence and ope
   c.openAgentTeam(b.uid);c.rosterIdentities.get(a.uid).fleet_uid='changed';c.openAgentTeam(a.uid);
   c.sessionPaused=true;c.openAgentTeam(a.uid);assert.equal(opened.length,0);
 });
-const panel = await import(`data:text/javascript;base64,${Buffer.from(await readFile(new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url), 'utf8')).toString('base64')}`);
+const panelSource = await readFile(new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url), 'utf8');
+const panel = await import(`data:text/javascript;base64,${Buffer.from(panelSource).toString('base64')}`);
 // Execute the real channel renderer, stopping before unrelated page mounting.
 const rendering = source.slice(0, source.indexOf('// WHY a card needs you')).replace(/^import .*;\n/gm, '');
 assert.ok(rendering.includes('function threadArticle('));
@@ -255,6 +257,21 @@ test('genuine paired nudge renders authored reason, accurate purpose and full ra
   assert.match(rendered, /<details><summary>Technical detail/);
   assert.ok(rendered.includes(panel.esc(t.messages[0].body)));
   assert.match(rendered, new RegExp(msg));
+});
+
+test('a room heading keeps whole characters from the first message', () => {
+  const prefix = 'x'.repeat(99);
+  for (const [character, tail] of [['👩🏽‍💻', ' details'], ['e\u0301', ' details'], ['界', ' details'], ['👩🏽‍💻', '']]) {
+    const body = prefix + character + tail;
+    const t = thread();
+    t.title = t.work_item_id = null;
+    t.task_events = [];
+    Object.assign(t.messages[0], {emitter: 'human', message_class: 'chat', work_item_id: null, body, body_words: body});
+    const rendered = html(t);
+    const heading = prefix + character + (tail ? '…' : '');
+    assert.ok(rendered.includes(`class="t-title">${heading}</span>`));
+    assert.ok(rendered.includes(body));
+  }
 });
 
 test('an assigned task uses its exact original assignment link and a plain title fallback', () => {
@@ -589,11 +606,29 @@ test('unavailable report content does not become status or evidence, legacy rema
 });
 
 
+test('the attention section distinguishes a paused task from a question for the reader', async () => {
+  const shell = await readFile(new URL('../claudlobby/plane/ui/index.html', import.meta.url), 'utf8');
+  assert.match(shell, /<h2>Needs attention <span id="attn-count"/);
+  const reasons = source.slice(source.indexOf('const WHY ='), source.indexOf('// An OUTSTANDING nudge'));
+  const describe = runInNewContext(reasons + '\nattentionWhy', {...panel, ago: () => '5m ago'});
+  const blocked = {attention: true, attention_reason: ['blocked_waiting']};
+  const paused = describe(blocked);
+  assert.match(paused, /Work paused — <small>/);
+  assert.match(paused, /Open the task to read the latest update\./);
+  assert.doesNotMatch(paused, /waiting on you|claudlobby --/);
+  assert.match(describe({...blocked, attention_since: '2026-01-01T00:00:00Z'}), /Work paused 5m ago/);
+  const overdue = describe({...blocked, attention_reason: ['overdue', 'blocked_waiting'],
+    attention_since: '2026-01-01T00:00:00Z'});
+  assert.match(overdue, /Work paused — <small>/);
+  const asked = describe({attention: true, attention_reason: ['escalated'], attention_question: 'Which step needs review?'});
+  assert.match(asked, /needs you: Which step needs review\?/);
+});
+
 test('permission attention opens the existing task and clears after a fresh decided read', () => {
   const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
   const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
   const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
-    ...panel, renderState: () => false, document: {
+    ...panel, taskPermissionSummary, renderState: () => false, document: {
       getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
     },
   });
@@ -601,9 +636,15 @@ test('permission attention opens the existing task and clears after a fresh deci
     attention: true, attention_reason: ['permission_pending'], permission_pending: 2};
   board.renderTasks({data: {tasks: [row]}});
   assert.match(nodes.attention.innerHTML, /2 permission requests need review/);
+  assert.match(nodes.attention.innerHTML, /open the task for its status/);
   assert.match(nodes.attention.innerHTML, /data-task-open="workshop::wi_/);
   assert.match(nodes.attention.innerHTML, /data-task-fleet="web"/);
   assert.equal(nodes['attn-count'].textContent, 1);
+  board.renderTasks({data: {tasks: [{...row, permission_incomplete: true,
+    attention_reason: ['permission_pending', 'permission_unavailable']}]}});
+  assert.match(nodes.attention.innerHTML, /At least 2 permission requests need review\. Permission history is incomplete/i);
+  assert.equal((nodes.attention.innerHTML.match(/permission history is incomplete/gi) || []).length, 1);
+  assert.equal((nodes.attention.innerHTML.match(/open the task/gi) || []).length, 1);
   board.renderTasks({data: {tasks: [{...row, attention_reason: ['permission_unavailable'], permission_pending: 0}]}});
   assert.match(nodes.attention.innerHTML, /permission history is incomplete/);
   assert.doesNotMatch(nodes.attention.innerHTML, /no tasks need attention/);
@@ -612,7 +653,7 @@ test('permission attention opens the existing task and clears after a fresh deci
   assert.doesNotMatch(nodes.tasks.innerHTML, /permission requests need review/);
 });
 
-test('task-specific partial coverage cannot become a clear empty board and preserves readable task rows', () => {
+function taskCardHarness() {
   const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
   const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
   const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
@@ -620,6 +661,30 @@ test('task-specific partial coverage cannot become a clear empty board and prese
       getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
     },
   });
+  return {board, nodes};
+}
+
+test('task card titles keep whole characters at the 160-character boundary', () => {
+  const {board, nodes} = taskCardHarness();
+  const first = '<note> ' + 'a'.repeat(152) + '👩🏽‍💻';
+  for (const tail of ['', ' details']) {
+    const row = {task_id:wi, fleet:'example', title:first + tail, state:'queued', resolved:true, attention:false};
+    board.renderTasks({state:'ok', data:{tasks:[row], issue_count:0, truncated:false}});
+    assert.ok(nodes.tasks.innerHTML.includes('>' + panel.esc(first) + (tail ? '…' : '') + '</button>'));
+  }
+});
+
+test('without a segmenter plain headings stay short and Unicode and full results are preserved', () => {
+  const legacy = runInNewContext(panelSource.replace(/^export /gm, '') + '\n({clip, graphemePrefix})', {Intl:{}});
+  const plain = 'a'.repeat(160);
+  assert.equal(legacy.clip(plain + ' tail', 160), plain + '…');
+  const joined = 'a'.repeat(99) + '👩🏽‍💻 résumé';
+  assert.equal(legacy.clip(joined, 100), joined);
+  assert.equal(legacy.graphemePrefix(plain + ' tail', 160), plain + ' tail');
+});
+
+test('task-specific partial coverage cannot become a clear empty board and preserves readable task rows', () => {
+  const {board, nodes} = taskCardHarness();
   // Other endpoints can remain healthy; this envelope alone defines task coverage.
   const env = {state:'ok',data:{tasks:[],issue_count:0,truncated:false,
     coverage:{total:2,reachable:1,partial:true}}};
@@ -657,7 +722,9 @@ test('older task browsing survives polls, deduplicates qualified rows and refres
     sessionPaused:false,sessionEpoch:1,currentFleet:'all',fleetQuery:()=>'',refreshBoards(){refreshes++;},
     async jget(url){calls++;assert.equal(url,'/api/tasks?cursor=older');return env([row('north::'+wi,'Repeated'),row('south::'+wi,'Older peer')],'older',null);}});
   board.renderTasks(recent);assert.equal(nodes['task-load-older'].hidden,false);
+  assert.match(nodes['task-history-count'].textContent,/^1 task loaded\./);
   await board.loadOlderTasks();assert.equal(calls,1);
+  assert.match(nodes['task-history-count'].textContent,/^2 tasks loaded\./);
   assert.match(nodes.tasks.innerHTML,/Recent/);assert.match(nodes.tasks.innerHTML,/Older peer/);assert.doesNotMatch(nodes.tasks.innerHTML,/Repeated/);
   board.acceptTaskPoll(env([row('north::new','Polled')],null,'newer'),true);
   assert.match(nodes.tasks.innerHTML,/Older peer/);assert.doesNotMatch(nodes.tasks.innerHTML,/Polled/);
@@ -682,9 +749,18 @@ test('task filters use exact assignees locally, preserve warning/count truth and
   assignee.value=board.taskAssigneeKey(row);assignee.onchange();
   assert.match(nodes.attention.innerHTML,/North active/);assert.doesNotMatch(nodes.attention.innerHTML,/South active/);
   assert.match(nodes.tasks.innerHTML,/North result/);assert.equal(nodes['attn-count'].textContent,2);
-  assert.match(nodes['task-filter-count'].textContent,/2 of 3 loaded task records/);assert.match(nodes['task-filter-count'].textContent,/Attention count is unfiltered/);
+  assert.match(nodes['task-filter-count'].textContent,/2 of 3 loaded task records/);assert.match(nodes['task-filter-count'].textContent,/Filters don’t change the attention count for loaded tasks/);
+  env.data.task_page = {version:1, next_cursor:'older'};
+  board.renderTasks(env);
+  assert.doesNotMatch(nodes['task-filter-count'].textContent,/Choose Load older work/);
   assert.match(nodes.attention.innerHTML,/2\/3 sources|Showing the newest 200/);assert.match(nodes.attention.innerHTML,/task-history issue/);
   status.value='blocked';status.onchange();
+  assert.match(nodes['task-filter-count'].textContent,/0 of 3 match\. Choose Load older work/);
+  for (const page of [{version:1, next_cursor:null}, {version:2, next_cursor:'older'}]) {
+    env.data.task_page = page;
+    board.renderTasks(env);
+    assert.doesNotMatch(nodes['task-filter-count'].textContent,/Choose Load older work/);
+  }
   assert.match(nodes.attention.innerHTML,/no matching recorded tasks/);assert.match(nodes.tasks.innerHTML,/no matching recorded tasks/);
   assert.doesNotMatch(nodes.attention.innerHTML,/no tasks need attention/);
   const selected=assignee.value;env.data.tasks=[peer];board.renderTasks(env);
@@ -839,4 +915,43 @@ test('bot-written text in the connected view is drawn as plain text: rooms, chec
   assert.deepEqual([fields.size, attributes.size], [60, 3]);
   for (const name of fields) assert.ok(text.includes(`${HOSTILE}·${name}`), `${name} is visible as its literal text`);
   for (const name of attributes) assert.ok(hostile.includes(`title="${panel.esc(`${HOSTILE}·${name}`)}"`), `${name} is an escaped title`);
+});
+
+test('delivery status distinguishes an unsuccessful send from an unconfirmed one', () => {
+  const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
+  const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
+  const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
+    ...panel, document: {
+      getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
+    },
+  });
+  const assignee = {assignee_short:'worker', expected_by:'2026-01-01T00:00:00Z'};
+  const row = {task_id:wi, fleet:'example', title:'Review the checklist', current_assignment:assignee,
+    state:'assigned', resolved:true, attention:true, attention_since:'2026-01-02T00:00:00Z'};
+  for (const [reason, label, advice, command] of [
+    ['send_failed', 'The send attempt failed', 'Open the task to see who is assigned.', 'task withdraw'],
+    ['never_activated', 'The send attempt is unconfirmed', 'Open the task to check its recorded delivery status.', 'task reassign'],
+  ]) {
+    for (const reasons of [[reason], ['escalated', reason, 'overdue']]) {
+      board.renderTasks({state:'ok', data:{tasks:[{...row, attention_reason:reasons}], issue_count:0, truncated:false}});
+      const card = nodes.attention.innerHTML;
+      const details = card.match(/<details class="task-record">([\s\S]*?)<\/details>/)?.[1];
+      assert.ok(details, 'recovery commands start in the closed Record details');
+      const shown = card.replace(/<details[\s\S]*?<\/details>/g, '');
+      assert.ok(shown.includes(label + ' —'));
+      assert.ok(shown.includes(advice));
+      assert.doesNotMatch(shown, /claudlobby --|never delivered/);
+      assert.ok(details.includes('Check the original message receipt before retrying delivery.'));
+      assert.ok(details.includes('claudlobby --json ' + command));
+      assert.equal(details.includes('assignment reschedule'), reasons.includes('overdue'));
+      assert.equal((details.match(/task reassign/g) || []).length,
+        reason === 'never_activated' || reasons.includes('overdue') ? 1 : 0);
+    }
+  }
+  board.renderTasks({state:'ok', data:{tasks:[{...row, attention_reason:['overdue']}], issue_count:0, truncated:false}});
+  const overdue = nodes.attention.innerHTML;
+  assert.ok(overdue.includes('assignment reschedule ASSIGNMENT_ID --expected-by'));
+  assert.doesNotMatch(overdue, /original message receipt|task withdraw/);
+  board.renderTasks({state:'ok', data:{tasks:[{...row, attention:false, attention_reason:null}], issue_count:0, truncated:false}});
+  assert.doesNotMatch(nodes.tasks.innerHTML, /claudlobby --|original message receipt/);
 });
