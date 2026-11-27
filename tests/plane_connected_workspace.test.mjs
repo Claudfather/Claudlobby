@@ -1058,7 +1058,9 @@ test('a timed-out Preview the computer is still preparing is checked again by it
   await p.tick();
   assert.equal(h.api.snapshot().note,READY_BANNER);
   assert.equal(offered(panel,'Launch team'),true);assert.deepEqual(filledIn(panel),['Launch team']);
-  assert.deepEqual(doneSteps(panel),['done','done']);assert.equal(p.live().length,0,'checks stop once the preview is ready');
+  assert.deepEqual(doneSteps(panel),['done','done']);
+  assert.deepEqual(p.live().map(timer=>timer.ms),[(h.preview.expires_at-p.clock.t)*1000],
+    'only the local expiry repaint remains once the preview is ready');
   await h.api.run('launch');assert.deepEqual(h.calls.at(-1),['launch',h.pending]);
   assert.equal(h.calls.filter(c=>c[0]==='preview').length,1);h.api.dispose();
 });
@@ -1260,6 +1262,23 @@ test('Bots already running here restart briefly shows above Launch team only whe
   await kept.api.run('context');
   assert.equal(kept.api.snapshot().note,READY_BANNER);assert.ok(aboveLaunch(panel,OTHERS_RESTART));kept.api.dispose();
 });
+test('an idle panel stops offering Launch at the preview deadline without checking the computer',async t=>{
+  t.mock.timers.enable({apis:['Date','setTimeout'],now:1800000000000});
+  const h=setupHarness({setupOptions:{now:()=>Date.now()/1000}});
+  const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+  try {
+    await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+    const button=buttonOf(panel,'Launch team'),status=panel.children.find(n=>n.className==='setup-note');
+    t.mock.timers.tick(599999);
+    assert.equal(button.disabled,false);assert.equal(status.textContent,READY_BANNER);
+    t.mock.timers.tick(1);
+    assert.equal(button.disabled,true,'a person who has not touched the page sees the preview expire');
+    assert.doesNotMatch(status.textContent,/ready/i);
+    const notice=descendants(panel).find(n=>visible(n)&&n.textContent==='This preview expired. Inspect the update on the computer.');
+    assert.equal(notice?.attributes.role,'status');
+    assert.deepEqual(h.calls.map(call=>call[0]),['context','preview']);
+  } finally { h.api.dispose(); }
+});
 test('the ready banner goes once the Preview runs out, where Launch team says it expired, and nothing is sent',async()=>{
   const clock={t:1800000000},h=setupHarness({setupOptions:{now:()=>clock.t}}),ui=dom(),panel=new ui.Element();
   h.api.mountPanel({document:ui.document,element:panel});
@@ -1282,6 +1301,26 @@ test('the ready banner goes once the Preview runs out, where Launch team says it
   assert.equal(l.api.snapshot().note,READY_BANNER);
   late.t=l.preview.expires_at+60;assert.equal(await l.api.run('launch'),false);
   assert.equal(l.api.snapshot().note,'');assert.equal(l.calls.filter(c=>c[0]==='launch').length,0);l.api.dispose();
+});
+test('returning to a suspended preview repaints immediately and closing the panel clears the deadline',async()=>{
+  for(const leave of ['return','dispose']){
+    let time=1800000000;
+    const timers=new Set();
+    const h=setupHarness({setupOptions:{now:()=>time,
+      setTimeout(fn){timers.add(fn);return fn;},clearTimeout(fn){timers.delete(fn);}}});
+    const ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
+    await h.api.run('context');h.api.setGoal('Improve tests');await h.api.run('preview');
+    assert.equal(timers.size,1);
+    if(leave==='return'){
+      time=h.preview.expires_at+60; // The background tab has not delivered its timer.
+      h.api.resumeHandoff();
+      assert.equal(buttonOf(panel,'Launch team').disabled,true);
+      assert.equal(timers.size,0);
+    }
+    h.api.dispose();
+    assert.equal(timers.size,0);
+    assert.deepEqual(h.calls.map(call=>call[0]),['context','preview']);
+  }
 });
 test('the ready banner goes once the page no longer holds the Preview: a connection change, one during Launch, and its end with no read',async()=>{
   const ready=async options=>{const h=setupHarness(options),ui=dom(),panel=new ui.Element();h.api.mountPanel({document:ui.document,element:panel});
@@ -2981,7 +3020,9 @@ test('a rebound setup request is not shown as launched, so its launch status can
 // answers to the launch status reads in order (an Error is thrown); check: what the hand-over's connection check does.
 function managedLaunch({launch,receipts=[],check,standalone=true,storage}={}) {
   const timers=[],answer=value=>{if(value instanceof Error)throw value;return value;};let h=null;
-  h=setupHarness({storage,setupOptions:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}},
+  h=setupHarness({storage,setupOptions:{
+    setTimeout(fn){timers.push(fn);return fn;},
+    clearTimeout(fn){const i=timers.indexOf(fn);if(i>=0)timers.splice(i,1);}},
     client:{...(launch?{async setupLaunch(input){h.calls.push(['launch',input]);return answer(launch(input));}}:{}),
       async setupReceipt(input){h.calls.push(['receipt',input]);
         return {...input,version:2,state:'quiesce',managed_owner:true,launch_reserved:true,config_committed:false,health_errors:{},...answer(receipts.shift())};},

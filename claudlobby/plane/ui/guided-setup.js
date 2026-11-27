@@ -145,12 +145,15 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // usable ('rejected') or got no answer ('lost'); only the last two are worth looking again. previewChecking: the
   // read that follows a failed Preview is queued. previewUntil/previewStopped: the bound on automatic checks.
   let previewState = null, previewWatch = false, previewTried = null, previewProblem = null, previewChecking = false;
+  let previewExpiryTimer = null;
   let previewTimer = null, previewUntil = 0, previewStopped = false;
   // Preview team can be sent only while the computer holds no preview for this approval (it refuses a second one).
   const previewOpen = () => (previewState === null || previewState === 'none') && !previewProblem && !previewChecking;
   const previewPolling = () => previewState === 'preparing' && !previewStopped && !previewProblem;
   function stopPreviewPoll() { clearTimeout(previewTimer); previewTimer = null; }
   function schedulePreviewPoll() {
+    // When this tab resumes, its local expiry repaint may still be queued.
+    if (previewExpiryTimer !== null && plan && plan.expires_at <= now()) render();
     if (previewTimer !== null || disposed || !context || pending || !previewPolling()) return;
     if (!previewUntil) previewUntil = now() + PREVIEW_POLL_SECONDS;
     if (now() >= previewUntil) { previewStopped = true; note = PREVIEW_NOTES.stopped; changed(); return; }
@@ -477,6 +480,12 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // this page no longer holds it (a connection change drops it). The banner is only ever set beside a plan.
     if (note === PREVIEW_NOTES.ready && (!plan || plan.expires_at <= time)) note = '';
     if (!mount) return;
+    // Repaint when the ready preview expires, even if the person leaves the page alone.
+    clearTimeout(previewExpiryTimer); previewExpiryTimer = null;
+    if (!busy && launchable && plan && plan.expires_at > time) {
+      const delay = Math.min(2 ** 31 - 1, Math.ceil((plan.expires_at - time) * 1000));
+      previewExpiryTimer = setTimeout(render, delay);
+    }
     const m = mount, live = active();
     // A launch the computer holds for this request was approved, even once the approval context is gone.
     const holding = launchHolding(), underway = standalone && launchUnderway;
@@ -673,6 +682,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     goalField.append(make('span','setup-field-label','What should your team work on first?'),area);
     goalStep.body.append(goalText,goalField,row(preview,previewCheck),goalHint);
     const launchStep = step('launch','Launch your team',{done:standalone}), summary = make('p','setup-step-text'), launchHint = make('p','setup-hint');
+    launchHint.setAttribute('role','status');
     const restart = make('p','setup-step-text');
     const launch = action('Launch team','pill setup-primary','launch'), receiptButton = action('Check launch status','pill ghost','receipt');
     const launchGoal = make('p','setup-goal'), launchGoalNote = make('p','setup-step-text');
@@ -705,5 +715,5 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // saw before is not about this computer now, so its saw-launch note goes. Nothing this visit confirmed is touched,
     // and the request itself stays kept (it still blocks a second launch and still leads Check launch status).
     noTeam() { if (unconfirmed && launchSeen && !followed && !managedHandoff) { seeLaunch(null); if (!disposed) render(); } },
-    dispose() { disposed = true; stopHandoff(); signin.stopPoll(); stopPreviewPoll(); epoch++; signin.dispose(); mount = null; }});
+    dispose() { disposed = true; clearTimeout(previewExpiryTimer); previewExpiryTimer = null; stopHandoff(); signin.stopPoll(); stopPreviewPoll(); epoch++; signin.dispose(); mount = null; }});
 }
