@@ -502,11 +502,15 @@ test('long result is an escaped labelled excerpt with full text in a closed disc
   response.data.task.terminal_event={event:'completed',detail:JSON.stringify({summary})};
   const h=harness({jget:()=>response});h.loop.setRoom('web');await settle();h.open();await settle();
   const html=h.get('task-detail-content').innerHTML;
-  const excerpt=html.slice(html.indexOf('Result excerpt'),html.indexOf('<summary>Read full result</summary>'));
-  assert.match(excerpt,/first 1,000 characters/);assert.match(excerpt,new RegExp('A'.repeat(1000)+'…'));
-  assert.doesNotMatch(excerpt,/full-result-tail/);
-  assert.match(html, new RegExp('A'.repeat(1100)+'&lt;full-result-tail&gt;'));
+  const detail=html.match(/<details class="task-record-details task-result-disclosure"><summary>Read full result<\/summary><pre class="task-record-body task-result">([^<]*)<\/pre><\/details>\s*<div class="task-result-preview">([\s\S]*?)<\/div>/);
+  assert.ok(detail,'place the full result control before its alternate preview');
+  assert.equal(detail[1],'A'.repeat(1100)+'&lt;full-result-tail&gt;');
+  assert.match(detail[2],/Result excerpt \(first 1,000 characters\)/);
+  assert.ok(detail[2].includes('A'.repeat(1000)+'…'));
+  assert.doesNotMatch(detail[2],/full-result-tail/);
   assert.doesNotMatch(html,/<full-result-tail>|<details[^>]*\bopen\b/);
+  const styles=await readFile(new URL('../claudlobby/plane/ui/workspace.css',import.meta.url),'utf8');
+  assert.match(styles,/\.task-result-disclosure\[open\] \+ \.task-result-preview\s*\{\s*display:\s*none;?\s*\}/);
   assert.ok(html.indexOf('Read full result')<html.indexOf('<h3>Feedback and conversation</h3>'));
 });
 
@@ -524,7 +528,8 @@ for (const [state, field, event] of [
       const h = harness({jget: () => response});
       h.loop.setRoom('web'); await settle(); h.open(); await settle();
       const html = h.get('task-detail-content').innerHTML;
-      const preview = html.match(/<pre class="task-record-body task-result">([^<]*)<\/pre>/)[1];
+      const excerpt = tail ? html.slice(html.indexOf('<div class="task-result-preview">')) : html;
+      const preview = excerpt.match(/<pre class="task-record-body task-result">([^<]*)<\/pre>/)[1];
       assert.equal(preview, firstThousand + (tail ? '…' : ''));
       assert.equal(html.includes('<summary>Read full '), Boolean(tail));
       if (tail) assert.ok(html.includes(firstThousand + tail + '</pre>'));
