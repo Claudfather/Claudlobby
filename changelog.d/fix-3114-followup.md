@@ -1,0 +1,3 @@
+### Docs — a broken term list's reason is described cause by cause (#3114)
+
+The failure table in `documentation/fleet-yaml-schema.md` and the `public-write-guard.py` row of `documentation/runtime-script-reference.md` said that a broken list's reason names a bad line by its number and column. A column comes only from a compile error that gives a position: too large a repeat count or groups nested too deep give the line's number and the exception's name, lines that do not compile together give no line, and a list path that cannot be read gives the system's reason. Both rows, and the guard's docstrings, now say what each cause's reason gives. What the guard does is unchanged.

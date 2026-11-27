@@ -916,13 +916,17 @@ def _release(fifo):
         (lambda p: p.write_text("zephyr[ ._-]?widgets\n" + "(" * 600 + "quillon" + ")" * 600 + "\n"),
          "line 2 does not compile: RecursionError"),
         (lambda p: (p.unlink(), os.mkfifo(p)), "it is a named pipe or a device, not a file"),
+        (lambda p: (p.unlink(), p.symlink_to(os.devnull)),
+         "it is a named pipe or a device, not a file"),
     ],
-    ids=["a-repeat-count-too-large", "groups-nested-too-deep", "a-named-pipe"],
+    ids=["a-repeat-count-too-large", "groups-nested-too-deep", "a-named-pipe",
+         "a-link-to-a-device"],
 )
 def test_whatever_stops_the_list_loading_makes_it_broken(env, tmp_path, make, why):
     """Anything that stops the list loading makes it broken: a line Python cannot
     compile for a reason of its own (a repeat count too large, groups nested too
-    deep), or a list path that is a named pipe, which a read would wait on. Every
+    deep), a list path that is a named pipe, which a read would wait on, or one that
+    is a device, here a link to the null device, which is never a list file. Every
     guarded write is refused, `--check` says broken and `--count` exits 2, and none
     of them waits."""
     terms = Path(env["PUBLIC_WRITE_GUARD_TERMS"])
@@ -946,9 +950,17 @@ def test_whatever_stops_the_list_loading_makes_it_broken(env, tmp_path, make, wh
 def test_a_list_too_large_to_read_is_broken(env, tmp_path):
     """A read of the list that runs out of memory makes it broken too, on all three
     paths. The list file is sparse (768 MiB, none of it on disk), and each run may use
-    at most 256 MiB of address space, so the read fails at once and costs nothing."""
+    at most 256 MiB of address space, so the read fails at once and costs nothing.
+    A sparse file still counts its whole size against the file-size limit, so under
+    a lower limit the test skips: the file could not be made, and the guard would
+    never run."""
+    size = 768 << 20
+    soft, _ = resource.getrlimit(resource.RLIMIT_FSIZE)
+    if soft != resource.RLIM_INFINITY and soft < size:
+        pytest.skip(f"the file-size limit (RLIMIT_FSIZE) is {soft} bytes, under the "
+                    f"{size} bytes of the list file this test makes")
     with open(env["PUBLIC_WRITE_GUARD_TERMS"], "wb") as f:
-        f.truncate(768 << 20)
+        f.truncate(size)
 
     def cap():
         resource.setrlimit(resource.RLIMIT_AS, (256 << 20, 256 << 20))
