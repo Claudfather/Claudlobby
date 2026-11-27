@@ -720,7 +720,13 @@ def test_managed_python_bounds_existing_version_door(tmp_path, shape):
 def test_managed_python_closes_stdin_kills_descendants_and_caps_output(tmp_path):
     context = _managed_shell_context(tmp_path)
     marker = tmp_path / "late-child"
-    hangs = _stub(tmp_path, "hangs-child", f'#!/bin/bash\n(sleep 2; touch "{marker}") &\nread -r data && exit 9\nsleep 30\n')
+    resistant = tmp_path / "late-closed-pipe-child"
+    hangs = _stub(tmp_path, "hangs-child", f"""#!/bin/bash
+(sleep 2; touch "{marker}") &
+(trap "" TERM; sleep 2; touch "{resistant}") </dev/null >/dev/null 2>&1 &
+read -r data && exit 9
+sleep 30
+""")
     prefix = f'. "{LIB}/lib-common.sh"; _OS=Darwin; _TIMEOUT_BIN=""; '
     eof = _stub(tmp_path, "stdin-closed", '#!/bin/bash\nif read -r data; then exit 8; fi\necho 2.1.281\n')
     r = _run(tmp_path, ["bash", "-c", prefix + f'printf "input\\n" | measure_claude_version "{eof}"; printf "%s" "$?"'], **context)
@@ -731,10 +737,50 @@ def test_managed_python_closes_stdin_kills_descendants_and_caps_output(tmp_path)
     assert time.monotonic() - started < 4
     time.sleep(2.2)
     assert not marker.exists()
+    assert not resistant.exists()
     flood = _stub(tmp_path, "flood", '#!/bin/bash\nwhile :; do printf "%01000d" 0; printf "%01000d" 0 >&2; done\n')
     r = _run(tmp_path, ["bash", "-c", prefix + f'measure_claude_version "{flood}" || printf "%s" "$CLAUDE_VERSION_WHY"'], CLAUDE_VERSION_TIMEOUT_S="2", _timeout=8, **context)
     assert "exited 125" in r.stdout, (r.stdout, r.stderr)
     assert len(r.stdout) < 600
+
+
+@pytest.mark.parametrize("group", ["gone", "present", "denied"])
+def test_managed_version_cleanup_requires_confirmation_the_group_is_gone(tmp_path, group):
+    import sys
+
+    shell = _shell_function("lib-common.sh", "measure_claude_version")
+    probe = shell.split("        probe='", 1)[1].split("\n'\n", 1)[0]
+    binary = _stub(tmp_path, "healthy", healthy("2.1.318"))
+    # All provider work is real except for the final group signal and its existence check.
+    scenario = """
+import errno, os, signal, sys
+probe, group = sys.argv[1:3]
+sys.argv = ["-c", *sys.argv[3:]]
+killpg = os.killpg
+checks = 0
+def signal_group(pid, sig):
+    global checks
+    if sig == signal.SIGKILL:
+        raise PermissionError(errno.EPERM, "original group error")
+    if sig == 0:
+        checks += 1
+        if group == "gone" and checks > 1:
+            raise ProcessLookupError(errno.ESRCH, "group exited")
+        if group != "present":
+            raise PermissionError(errno.EPERM, "group check denied")
+        return
+    killpg(pid, sig)
+os.killpg = signal_group
+exec(probe)
+"""
+    result = _run(tmp_path, [sys.executable, "-I", "-S", "-c", scenario,
+                             probe, group, "2", str(binary)], _timeout=5)
+    if sys.platform == "darwin" and group == "gone":
+        assert result.returncode == 0, result.stderr
+        assert "2.1.318" in result.stdout
+    else:
+        assert result.returncode != 0
+        assert "original group error" in result.stderr
 
 
 def test_managed_context_propagates_without_changing_provider_precedence(tmp_path, monkeypatch):

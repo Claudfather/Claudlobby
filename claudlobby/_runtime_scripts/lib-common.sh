@@ -367,7 +367,7 @@ measure_claude_version() {
         python="$(_managed_browser_python)"
         # Version measurement only: no generic command runner or PATH Python.
         probe='
-import math, os, selectors, signal, subprocess, sys, time
+import errno, math, os, selectors, signal, subprocess, sys, time
 try:
     seconds = float(sys.argv[1])
     if not math.isfinite(seconds) or not 0 < seconds <= 120:
@@ -427,6 +427,22 @@ finally:
         os.killpg(child.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    except PermissionError as error:
+        if sys.platform != "darwin" or error.errno != errno.EPERM:
+            raise
+        # Darwin may report EPERM as the last group member exits. Preserve the
+        # failure unless the kernel confirms the group has disappeared.
+        until = time.monotonic() + 0.1
+        while time.monotonic() < until:
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                break
+            except PermissionError:
+                pass
+            time.sleep(0.01)
+        else:
+            raise
     child.wait(timeout=1)
     selector.close()
     for stream in streams:
