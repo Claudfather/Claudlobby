@@ -29,7 +29,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   let storage;
   try { storage = sessionStorage; } catch { storage = null; }
   const state = new ActionState(storage);
-  const permissions = createPermissionPanel({api,storage});
+  const permissions = createPermissionPanel({api, storage, onSummaryChange: paintPermissionSummary});
   const contextsByKind = new Map(), checkingReceipts = new Set();
   const actionRefreshEpochs = new Map(), deniedContexts = new Set(), checkingTaskContexts = new Set();
   const deniedNote = 'Action access is not authorized for this team. Reading remains available. The host owner must approve action access.';
@@ -533,16 +533,21 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       <pre class="task-record-body task-result">${esc(text.slice(0, 1000))}…</pre>
       <details class="task-record-details"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body">${esc(text)}</pre></details>`;
   }
+  function paintPermissionSummary(summary) {
+    const status = $("task-permission-summary");
+    if (!status) return;
+    if (status.textContent !== summary) status.textContent = summary;
+    status.hidden = !summary;
+  }
   function renderDetail(task, boardOnly, unavailable = null) {
     paintAccess();
-    const permissionStatus = taskPermissionSummary(task);
     const content = $("task-detail-content");
     const lastEvent = task.last_event || task.history?.at(-1);
     const assignment = task.current_assignment;
     content.innerHTML = `<p class="eyebrow">${esc(roomLabel(task.fleet || "Team not recorded"))} · TASK</p>
       <h2 id="task-detail-title">${esc(task.title || "Recorded task")}</h2>
       <p class="task-state"><b>${esc(task.state || "State unknown")}</b></p>
-      ${permissionStatus ? `<p class="task-question"><b>${esc(permissionStatus)}</b></p>` : ""}
+      <p id="task-permission-summary" class="task-question" role="status" hidden></p>
       ${unavailable ? stateBlock(unavailable.state || "unavailable", unavailable.provenance, unavailable.remediation) : ""}
       <dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assigneeLabel(assignment))}</dd>
       <dt>Last recorded action</dt><dd>${esc(lastEvent?.event || "No action recorded")} · ${esc(ago(lastEvent?.occurred_at))}</dd>
@@ -577,6 +582,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       ${(task.issues || []).length ? `<h3>History issues</h3><ul>${task.issues.map(i => `<li>${esc(i.code)}${i.blocking ? " · unresolved" : " · historical"}</li>`).join("")}</ul>` : ""}
       ${task.issues_window?.truncated ? '<p class="note">Additional history issues are omitted from this bounded view.</p>' : ""}</details>`}
       <p class="note">Task state, history, recorded reports and action selection are a snapshot. Use Refresh to read them again.</p>`;
+    paintPermissionSummary(taskPermissionSummary(task));
     detailSnapshot = { task: Object.freeze({ ...task, ...(Object.hasOwn(task, "current_assignment")
       ? { current_assignment: task.current_assignment && Object.freeze({ ...task.current_assignment }) } : {}) }), boardOnly };
     if (!boardOnly) void permissions.show($("task-permissions"),task);
@@ -764,6 +770,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   $("task-detail-close").onclick = closeDetail;
   $("task-detail-refresh").onclick = () => { ++compositionEpoch; detail(); $("task-detail-refresh").hidden = true; };
   dialog.addEventListener("close", () => {
+    permissions.close();
     ++detailEpoch; pendingDetail = null;
     paintAccess();
     $("task-detail-content").innerHTML = "";

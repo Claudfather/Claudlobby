@@ -606,6 +606,11 @@ test('permission attention opens the existing task and clears after a fresh deci
   assert.match(nodes.attention.innerHTML, /data-task-open="workshop::wi_/);
   assert.match(nodes.attention.innerHTML, /data-task-fleet="web"/);
   assert.equal(nodes['attn-count'].textContent, 1);
+  board.renderTasks({data: {tasks: [{...row, permission_incomplete: true,
+    attention_reason: ['permission_pending', 'permission_unavailable']}]}});
+  assert.match(nodes.attention.innerHTML, /At least 2 permission requests need review\. Permission history is incomplete/i);
+  assert.equal((nodes.attention.innerHTML.match(/permission history is incomplete/gi) || []).length, 1);
+  assert.equal((nodes.attention.innerHTML.match(/open the task/gi) || []).length, 1);
   board.renderTasks({data: {tasks: [{...row, attention_reason: ['permission_unavailable'], permission_pending: 0}]}});
   assert.match(nodes.attention.innerHTML, /permission history is incomplete/);
   assert.doesNotMatch(nodes.attention.innerHTML, /no tasks need attention/);

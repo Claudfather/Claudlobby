@@ -532,7 +532,7 @@ function renderChannel(env) {
 const WHY = {
   permission_pending: (r) => [
     taskPermissionSummary(r), "open the task for its status"],
-  permission_unavailable: () => [
+  permission_unavailable: (r) => r.permission_incomplete && r.attention_reason.includes("permission_pending") ? null : [
     "permission history is incomplete",
     "open this task to inspect permission status; more requests may need a decision"],
   escalated: (r) => [
@@ -583,9 +583,11 @@ const WHY = {
 
 function attentionWhy(r) {
   if (!r.attention) return "";
-  const parts = (r.attention_reason || []).filter((k) => WHY[k]).map((k) => {
-    const [reason, fix] = WHY[k](r);
-    return `${esc(reason)} — <small>${esc(fix)}</small>`;
+  const parts = (r.attention_reason || []).flatMap((k) => {
+    const description = WHY[k]?.(r);
+    if (!description) return [];
+    const [reason, fix] = description;
+    return [`${esc(reason)} — <small>${esc(fix)}</small>`];
   });
   if (!parts.length) return "";
   return `<div class="why">⚠ ${parts.join(" · ")}</div>`;

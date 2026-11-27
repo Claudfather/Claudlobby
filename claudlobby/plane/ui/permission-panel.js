@@ -4,11 +4,12 @@ import { esc } from "./panel-state.js";
 export function taskPermissionSummary({permission_pending: count, permission_incomplete: incomplete}) {
   if (!Number.isSafeInteger(count) || count < 1) return incomplete ? 'Permission history is incomplete' : '';
   const requests = count === 1 ? 'permission request needs' : 'permission requests need';
-  return `${incomplete ? 'At least ' : ''}${count} ${requests} review`;
+  const summary = `${count} ${requests} review`;
+  return incomplete ? `At least ${summary}. Permission history is incomplete` : summary;
 }
 
 // Presentation and pending UUIDs only; all authority and decisions stay on host.
-export function createPermissionPanel({api, storage}) {
+export function createPermissionPanel({api, storage, onSummaryChange}) {
   const state = new ActionState(storage, 'plane.pending-permissions.v1');
   let element = null, task = null, context = null, epoch = 0, busy = false, form = null, note = '';
   const labels = {approve:'Approve', decline:'Decline', revoke:'Revoke'};
@@ -19,6 +20,13 @@ export function createPermissionPanel({api, storage}) {
     && ['workspace','host','fleet'].every(k => row.scope[k] === context.scope[k]);
   const pending = p => state.pending.some(row => visible(row) && row.target.permission_id === p.permission_id
     && (p.state !== 'approved' || row.decision === 'revoke'));
+  function publishSummary() {
+    const rows = context.permissions;
+    onSummaryChange(taskPermissionSummary({
+      permission_pending: rows.filter(row => row.state === 'pending').length,
+      permission_incomplete: context.has_more || rows.some(row => row.state === 'unavailable'),
+    }));
+  }
   function paint() {
     if (!element) return;
     if (!context) {
@@ -67,6 +75,7 @@ export function createPermissionPanel({api, storage}) {
       throw new Error('The outcome is unconfirmed. Check this original receipt before deciding again.');
     state.accept(request,receipt);
     context = {...context,permissions:context.permissions.map(p => p.permission_id === receipt.permission.permission_id ? receipt.permission : p)};
+    publishSummary();
     form = null;
     const delivery = receipt.notification === 'received' ? 'The requesting bot received the notice.'
       : receipt.notification === 'not_requested' ? 'This host did not request a bot notification.'
@@ -137,6 +146,7 @@ export function createPermissionPanel({api, storage}) {
       if (!validPermissionContext(value) || value.room !== task.fleet || value.task_id !== task.task_id
           || !['prepareAction','sendAction','actionReceipt'].every(k => typeof api[k] === 'function')) throw new Error();
       context = JSON.parse(JSON.stringify(value)); note = '';
+      publishSummary();
     } catch (error) { if (token === epoch) note = error?.code === 'action_not_authorized'
       ? 'Permission decisions are not authorized for this team. Reading remains available. The host owner must approve action access.'
       : 'Permission access is unavailable. Check this computer’s connection, then refresh the task.'; }
