@@ -6,7 +6,9 @@ files, not the full POSIX env-var grammar. Helpers:
   - read(path)               → parse to dict, strips `export ` prefix and quotes
   - format_file(header, vars) → render `export VAR=<quoted>` lines for writing
   - _write_config(...)       → the one private writer: 0600 temp file, fsync,
-                               atomic replace (shared with fleet setup)
+                               atomic replace (shared with fleet setup); the
+                               file keeps an existing one's owner read and
+                               write bits, so 0400 stays 0400
   - refuse_unsafe_destination(path) → refuse a symlink or non-regular file
                                before any private write
 
@@ -20,13 +22,17 @@ shlex.quote so $, backtick, backslash, and newlines are literal.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shlex
+import stat
 import tempfile
 from pathlib import Path
 
 from .command_result import CommandFailure
+
+_log = logging.getLogger(__name__)
 
 
 def read(path: Path) -> dict[str, str]:
@@ -95,7 +101,22 @@ def _sync_parent(path: Path) -> None:
         os.close(parent_fd)
 
 
+def _kept_mode(destination: Path) -> int:
+    """The mode the private writer gives ``destination``: an existing regular file's owner
+    read and write bits (0640 and 0644 become 0600, 0400 stays 0400), else 0600."""
+    try:
+        info = os.lstat(destination)
+    except FileNotFoundError:
+        return 0o600
+    return stat.S_IMODE(info.st_mode) & 0o600 if stat.S_ISREG(info.st_mode) else 0o600
+
+
 def _write_config(destination: Path, content: bytes, *, replace: bool, prefix: str = ".fleet-yaml-") -> None:
+    """Write ``content`` to ``destination`` from a temp file in its folder, 0600 from the first byte.
+
+    Before the rename the temp file takes ``_kept_mode(destination)``. A folder fsync that
+    fails once the new file is in place is a warning, not an error: the file is live.
+    """
     fd, name = tempfile.mkstemp(prefix=prefix, dir=destination.parent)
     temporary = Path(name)
     try:
@@ -103,7 +124,7 @@ def _write_config(destination: Path, content: bytes, *, replace: bool, prefix: s
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
+        os.chmod(temporary, _kept_mode(destination))
         if replace:
             os.replace(temporary, destination)
         else:
@@ -111,7 +132,10 @@ def _write_config(destination: Path, content: bytes, *, replace: bool, prefix: s
                 os.link(temporary, destination)
             except FileExistsError as exc:
                 raise CommandFailure("conflict", "conflict: fleet configuration changed while setup was preparing") from exc
-        _sync_parent(destination)
+        try:
+            _sync_parent(destination)
+        except OSError as exc:
+            _log.warning("%s: written, but its folder could not be synced: %s", destination, exc)
     finally:
         temporary.unlink(missing_ok=True)
 
