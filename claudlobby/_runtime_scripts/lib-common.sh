@@ -381,6 +381,31 @@ try:
 except OSError as exc:
     print(str(exc), file=sys.stderr)
     sys.exit(127)
+def signal_group(sig):
+    try:
+        os.killpg(child.pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError as error:
+        if sys.platform != "darwin" or error.errno != errno.EPERM:
+            raise
+        # Darwin may report EPERM while the last group member exits. Reap the
+        # leader and keep the original failure unless the kernel confirms removal.
+        end = time.monotonic() + 0.1
+        while time.monotonic() < end:
+            child.poll()
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                pass
+            except OSError:
+                raise error
+            time.sleep(0.01)
+        raise error
+
 selector = selectors.DefaultSelector()
 streams = {child.stdout: bytearray(), child.stderr: bytearray()}
 for stream in streams:
@@ -413,36 +438,14 @@ try:
             rc = 124
 finally:
     # Own the entire child group, even when its leader exits before a child.
-    try:
-        os.killpg(child.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    end = time.monotonic() + 0.1
-    while selector.get_map() and time.monotonic() < end:
-        for key, _ in selector.select(0.01):
-            if not os.read(key.fd, 4096):
-                selector.unregister(key.fileobj)
-    child.poll()  # Reap a terminated leader before signalling its remaining group.
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except PermissionError as error:
-        if sys.platform != "darwin" or error.errno != errno.EPERM:
-            raise
-        # Darwin may report EPERM as the last group member exits. Preserve the
-        # failure unless the kernel confirms the group has disappeared.
-        until = time.monotonic() + 0.1
-        while time.monotonic() < until:
-            try:
-                os.killpg(child.pid, 0)
-            except ProcessLookupError:
-                break
-            except PermissionError:
-                pass
-            time.sleep(0.01)
-        else:
-            raise
+    if signal_group(signal.SIGTERM):
+        end = time.monotonic() + 0.1
+        while selector.get_map() and time.monotonic() < end:
+            for key, _ in selector.select(0.01):
+                if not os.read(key.fd, 4096):
+                    selector.unregister(key.fileobj)
+        child.poll()
+        signal_group(signal.SIGKILL)
     child.wait(timeout=1)
     selector.close()
     for stream in streams:

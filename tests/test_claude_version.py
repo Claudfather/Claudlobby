@@ -720,10 +720,10 @@ def test_managed_python_bounds_existing_version_door(tmp_path, shape):
 def test_managed_python_closes_stdin_kills_descendants_and_caps_output(tmp_path):
     context = _managed_shell_context(tmp_path)
     marker = tmp_path / "late-child"
-    resistant = tmp_path / "late-closed-pipe-child"
+    term_ignoring = tmp_path / "term-ignoring-child"
     hangs = _stub(tmp_path, "hangs-child", f"""#!/bin/bash
 (sleep 2; touch "{marker}") &
-(trap "" TERM; sleep 2; touch "{resistant}") </dev/null >/dev/null 2>&1 &
+(trap "" TERM; sleep 2; touch "{term_ignoring}") </dev/null >/dev/null 2>&1 &
 read -r data && exit 9
 sleep 30
 """)
@@ -737,50 +737,84 @@ sleep 30
     assert time.monotonic() - started < 4
     time.sleep(2.2)
     assert not marker.exists()
-    assert not resistant.exists()
+    assert not term_ignoring.exists()
     flood = _stub(tmp_path, "flood", '#!/bin/bash\nwhile :; do printf "%01000d" 0; printf "%01000d" 0 >&2; done\n')
     r = _run(tmp_path, ["bash", "-c", prefix + f'measure_claude_version "{flood}" || printf "%s" "$CLAUDE_VERSION_WHY"'], CLAUDE_VERSION_TIMEOUT_S="2", _timeout=8, **context)
     assert "exited 125" in r.stdout, (r.stdout, r.stderr)
     assert len(r.stdout) < 600
 
 
-@pytest.mark.parametrize("group", ["gone", "present", "denied"])
-def test_managed_version_cleanup_requires_confirmation_the_group_is_gone(tmp_path, group):
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGKILL"])
+@pytest.mark.parametrize("platform, checks, measured", [
+    ("darwin", "denied,gone", True), ("darwin", "present", False), ("darwin", "denied", False),
+    ("darwin", "unknown", False), ("linux", "gone", False),
+])
+def test_managed_version_cleanup_requires_confirmation_the_group_is_gone(tmp_path, signal_name, platform, checks, measured):
     import sys
 
     shell = _shell_function("lib-common.sh", "measure_claude_version")
     probe = shell.split("        probe='", 1)[1].split("\n'\n", 1)[0]
     binary = _stub(tmp_path, "healthy", healthy("2.1.318"))
-    # All provider work is real except for the final group signal and its existence check.
+    # The provider exits normally. Simulate the kernel response to one cleanup signal.
     scenario = """
-import errno, os, signal, sys
-probe, group = sys.argv[1:3]
-sys.argv = ["-c", *sys.argv[3:]]
+import errno, itertools, os, selectors, signal, subprocess, sys
+probe, signal_name, platform, sequence = sys.argv[1:5]
+sys.argv = ["-c", *sys.argv[5:]]
+sys.platform = platform
 killpg = os.killpg
-checks = 0
+outcomes = sequence.split(",")
+checks = itertools.chain(outcomes, itertools.repeat(outcomes[-1]))
 def signal_group(pid, sig):
-    global checks
-    if sig == signal.SIGKILL:
+    if sig == getattr(signal, signal_name):
         raise PermissionError(errno.EPERM, "original group error")
+    if sig == signal.SIGTERM:
+        return  # Reach the SIGKILL case after a successful SIGTERM.
+    if sig == signal.SIGKILL:
+        raise AssertionError("signalled a group already confirmed gone")
     if sig == 0:
-        checks += 1
-        if group == "gone" and checks > 1:
+        outcome = next(checks)
+        if outcome == "gone":
             raise ProcessLookupError(errno.ESRCH, "group exited")
-        if group != "present":
+        if outcome == "denied":
             raise PermissionError(errno.EPERM, "group check denied")
+        if outcome == "unknown":
+            raise OSError(errno.EINVAL, "unknown group check result")
         return
     killpg(pid, sig)
 os.killpg = signal_group
 exec(probe)
 """
     result = _run(tmp_path, [sys.executable, "-I", "-S", "-c", scenario,
-                             probe, group, "2", str(binary)], _timeout=5)
-    if sys.platform == "darwin" and group == "gone":
+                             probe, signal_name, platform, checks, "2", str(binary)], _timeout=5)
+    if measured:
         assert result.returncode == 0, result.stderr
         assert "2.1.318" in result.stdout
     else:
         assert result.returncode != 0
         assert "original group error" in result.stderr
+
+
+@pytest.mark.skipif(os.uname().sysname != "Darwin", reason="Darwin process group reaping")
+def test_managed_version_timeout_reaps_a_late_leader(tmp_path):
+    import sys
+
+    shell = _shell_function("lib-common.sh", "measure_claude_version")
+    probe = shell.split("        probe='", 1)[1].split("\n'\n", 1)[0]
+    binary = _stub(tmp_path, "wait-for-termination", "#!/bin/bash\nexec sleep 30\n")
+    # Leave the terminated leader for the confirmation loop to reap.
+    scenario = """
+import subprocess, sys, time
+probe = sys.argv.pop(1)
+poll = subprocess.Popen.poll
+def defer_first_poll(process):
+    subprocess.Popen.poll = poll
+    time.sleep(0.1)
+    return None
+subprocess.Popen.poll = defer_first_poll
+exec(probe)
+"""
+    result = _run(tmp_path, [sys.executable, "-I", "-S", "-c", scenario, probe, "0.2", str(binary)])
+    assert result.returncode == 124, result.stderr
 
 
 def test_managed_context_propagates_without_changing_provider_precedence(tmp_path, monkeypatch):
