@@ -91,7 +91,7 @@ Readers: claudlobby event list / fleet reports list / fleet uptime / fleet statu
 
 | Type | Source | Meaning |
 |------|--------|---------|
-| `tool_call` | vitals | Bot used a tool (high volume — filter or skip in queries) |
+| `tool_call` | vitals | Bot used a tool: `tool`, `event` (`PreToolUse` or `PostToolUse`) and `session`, and on a Skill call `skill`, the skill's name as the call gives it (for example `claudna:session`), never the call's arguments. High volume: filter or skip in queries |
 | `keepalive_restart`, `keepalive_skip`, `keepalive_reload`, `bridge_heal` | keepalive | A keepalive transition: it restarted a dead session, declined a restart (the session reappeared, a crash loop, a boot in flight), sent an idle bot `/reload-plugins` and `/reload-skills`, or bounced or reset a dark Telegram bridge. The per-tick verdict (BUSY, IDLE, HELD, LIMIT, UNKNOWN) rides the `bot.heartbeat` sample, not an event |
 | `usage_limit_hit` | hook | `usage-limit-hook.sh` (StopFailure): a claude.ai usage limit ended the bot's turn. `limit_line` is Claude Code's own line, with the reset time it printed (#996) |
 | `keepalive_limit_resume` | keepalive | keepalive's one resume for a limit's reset (`KEEPALIVE_LIMIT_RESUME_ENABLED=1`): `menu` (`confirmed` when it chose "Stop and wait for limit to reset" by its label first, else `none`) and `outcome` (`submitted`, `unsubmitted`, `send-failed`, or why it stopped) |
