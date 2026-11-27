@@ -10,6 +10,7 @@ import shutil
 import tempfile
 
 from ..command_result import CommandFailure, CommandOutput
+from ..dotenv import _sync_parent, _write_config  # noqa: F401  (kept importable here)
 from ..setup_observations import RUNTIME_EXECUTABLES
 
 
@@ -162,14 +163,6 @@ def _flat_destination(root: Path, fleet: str) -> Path:
     return flat / "fleet.yaml"
 
 
-def _sync_parent(path: Path) -> None:
-    parent_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
-
-
 def _copy_config(content: bytes, destination: Path, *, replace: bool) -> tuple[bool, bytes | None, list[Path]]:
     """Install the declaration; return (changed, prior bytes, directories created)."""
     created = []
@@ -212,27 +205,6 @@ def _restore_config(destination: Path, written: bytes, prior: bytes | None, crea
         return "restored"
     except OSError:
         return "restore_failed"
-
-
-def _write_config(destination: Path, content: bytes, *, replace: bool, prefix: str = ".fleet-yaml-") -> None:
-    fd, name = tempfile.mkstemp(prefix=prefix, dir=destination.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
-        if replace:
-            os.replace(temporary, destination)
-        else:
-            try:
-                os.link(temporary, destination)
-            except FileExistsError as exc:
-                raise CommandFailure("conflict", "conflict: fleet configuration changed while setup was preparing") from exc
-        _sync_parent(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _fleet_setup(args) -> CommandOutput:

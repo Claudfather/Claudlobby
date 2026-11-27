@@ -1,10 +1,14 @@
 """Tiny .env file parser used across the compositor.
 
 Hand-rolled because the .env files claudlobby reads are simple shell-style
-files, not the full POSIX env-var grammar. Two helpers:
+files, not the full POSIX env-var grammar. Helpers:
 
   - read(path)               → parse to dict, strips `export ` prefix and quotes
   - format_file(header, vars) → render `export VAR=<quoted>` lines for writing
+  - _write_config(...)       → the one private writer: 0600 temp file, fsync,
+                               atomic replace (shared with fleet setup)
+  - refuse_unsafe_destination(path) → refuse a symlink or non-regular file
+                               before any private write
 
 Lives in its own module so __main__ (migration env writer) and validator
 (env-presence checker) can both import without circularity.
@@ -16,9 +20,13 @@ shlex.quote so $, backtick, backslash, and newlines are literal.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import tempfile
 from pathlib import Path
+
+from .command_result import CommandFailure
 
 
 def read(path: Path) -> dict[str, str]:
@@ -77,3 +85,43 @@ def format_file(header: str, vars_dict: dict[str, str]) -> str:
         lines.append(f"export {k}={shlex.quote(str(vars_dict[k]))}")
     lines.append("")
     return "\n".join(lines)
+
+
+def _sync_parent(path: Path) -> None:
+    parent_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _write_config(destination: Path, content: bytes, *, replace: bool, prefix: str = ".fleet-yaml-") -> None:
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=destination.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        if replace:
+            os.replace(temporary, destination)
+        else:
+            try:
+                os.link(temporary, destination)
+            except FileExistsError as exc:
+                raise CommandFailure("conflict", "conflict: fleet configuration changed while setup was preparing") from exc
+        _sync_parent(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def refuse_unsafe_destination(path: Path) -> None:
+    """Refuse a private write over a symlink or a non-regular file; nothing is touched."""
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        kind = "a symlink" if path.is_symlink() else "not a regular file"
+        raise CommandFailure(
+            "conflict",
+            f"conflict: {path} is {kind}; left unchanged",
+            hint="replace it with a regular file (copy the values in), then run the command again",
+        )
