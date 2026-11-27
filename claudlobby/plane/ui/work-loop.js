@@ -530,9 +530,9 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (!text) return `<p class="detail-empty">${closed ? "Result" : "Update"} text is not available in this snapshot. Open task details below to inspect the recorded reports and history.</p>`;
     const preview = graphemePrefix(text, 1000);
     if (preview === text) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
-    return `<p class="note">${closed ? "Result" : "Update"} excerpt (first 1,000 characters).</p>
-      <pre class="task-record-body task-result">${esc(preview)}…</pre>
-      <details class="task-record-details"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body">${esc(text)}</pre></details>`;
+    return `<details class="task-record-details task-result-disclosure"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body task-result">${esc(text)}</pre></details>
+      <div class="task-result-preview"><p class="note">${closed ? "Result" : "Update"} excerpt (first 1,000 characters).</p>
+      <pre class="task-record-body task-result">${esc(preview)}…</pre></div>`;
   }
   function paintPermissionSummary(summary) {
     const status = $("task-permission-summary");
