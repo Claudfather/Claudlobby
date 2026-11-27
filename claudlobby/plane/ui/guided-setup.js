@@ -684,9 +684,9 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     const launchDone = standalone ? make('span') : null; launchStep.done?.append(launchDone);
     const disclosure = make('details','setup-details'), declaration = make('p'), authority = make('p'), counts = make('p'), details = make('pre');
     disclosure.append(make('summary','',TECHNICAL_DETAILS),declaration,authority,counts,row(recheck),details); element.append(disclosure);
-    mount = {root:element,document,lede,status,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus:parts.signinStatus,signinLink:parts.signinLink,signinCopyButton:parts.signinCopyButton,
+    mount = {root:element,document,lede,status,draftNotice,steps,connect:connectStep,launchDone,approveDone,recheck,approveHint,signinStatus:parts.signinStatus,signinLink:parts.signinLink,signinCopyButton:parts.signinCopyButton,
       signinCopyNote:parts.signinCopyNote,signinField:parts.signinField,code:parts.code,codeRow:parts.codeRow,
-      signinControls:parts.signinControls,goalDone,goalText,area,goalHint,summary,restart,draftNotice,launchGoal,launchGoalNote,launchHint,disclosure,declaration,authority,counts,details,
+      signinControls:parts.signinControls,goalDone,goalText,area,goalHint,summary,restart,launchGoal,launchGoalNote,launchHint,disclosure,declaration,authority,counts,details,
       controls:{context:contextButton,preview,previewCheck,launch,receipt:receiptButton}};
     detailsFor = null; render();
   }
