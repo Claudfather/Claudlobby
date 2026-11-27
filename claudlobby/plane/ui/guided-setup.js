@@ -348,7 +348,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (value.request === null && value.provider_signin === true) signin.setAside(value.generation);
         if (value.provider_signin === true && value.signin_attempt) signin.receipt(value.signin_attempt);
         if (value.request === null && pending && pending.generation !== value.generation) setAside();
-        if (kept && !pending && goal.trim() && goal !== kept.goal) replacedDraftRequest = binding(kept);
+        if (kept && !pending && trimGoal(goal) && goal !== kept.goal) replacedDraftRequest = binding(kept);
         if (value.request) {
           if (pending && !same(pending,value.request)) retain(pending,conflicts);
           pending = binding(value.request); save(pending);
@@ -360,6 +360,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
         if (kept) {
           const {goal:keptGoal,...prepared} = kept;
           plan = Object.freeze(prepared); goal = planGoal = keptGoal; launchable = true; previewTried = null;
+          if (mount) mount.area.value = goal; // the field shows the goal Preview and Launch would use
           seeLaunch(null); // the computer keeps this Preview only while nothing was dispatched, so nothing runs yet
         }
         // A ready plan whose window this browser's clock has already passed reads as expired.
