@@ -777,39 +777,83 @@ test('task filters use exact assignees locally, preserve warning/count truth and
   assert.equal(assignee.value,'');assert.equal(status.value,'');assert.equal(assignee.disabled,true);
 });
 
-for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal'])
-test(`task board refresh preserves exact keyboard position without stealing focus: ${change}`, () => {
+const visibleText = html => html.replace(/<[^>]*>/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+
+function taskBoardFocusHarness(change) {
+  let room = 'all';
   const document = {activeElement:null, documentElement:{style:{setProperty(){}}}};
   const body = {}; document.activeElement = body;
   const nodes = Object.fromEntries(['attention','tasks','attn-count'].map(id => [id, {
     children:[], hidden:false, isConnected:true,
-    contains(node) { return this.children.includes(node); },
+    contains(node) { return this === node || this.children.some(button => button === node || button.summary === node); },
     closest() { return this.hidden ? this : null; },
     focus() { if (!this.hidden) document.activeElement=this; },
-    querySelectorAll() { return this.children; },
+    querySelectorAll(selector) {
+      return selector === '[data-task-open]' ? this.children : this.children.filter(button => button.record.open).map(button => button.summary);
+    },
     set innerHTML(value) {
-      for (const child of this.children) { child.isConnected=false; if (document.activeElement===child) document.activeElement=body; }
-      this.children=[...value.matchAll(/data-task-open="([^"]+)" data-task-fleet="([^"]*)"/g)].map(match => ({
-        dataset:{taskOpen:match[1],taskFleet:match[2]}, isConnected:true,hidden:false,disabled:false,
-        closest:() => this.hidden ? this : null,
-        focus() { if (this.isConnected && !this.hidden && !this.disabled) document.activeElement=this; },
-      }));
+      for (const button of this.children) {
+        button.isConnected = false;
+        if (document.activeElement === button || document.activeElement === button.summary) document.activeElement = body;
+      }
+      const records = [...value.matchAll(/<details class="task-record"( open)?><summary data-task-record="([^"]+)"/g)];
+      this.children=[...value.matchAll(/data-task-open="([^"]+)" data-task-fleet="([^"]*)"/g)].map((match, index) => {
+        const card = {querySelector: () => button.summary};
+        const record = {open: Boolean(records[index][1])};
+        const button = {
+          dataset:{taskOpen:match[1],taskFleet:match[2]}, isConnected:true,hidden:false,disabled:false,
+          closest:() => this.hidden ? this : null, parentElement:card,
+          focus() { if (this.isConnected && !this.hidden && !this.disabled) document.activeElement=this; },
+          record,
+          summary:{
+            dataset:{taskRecord: visibleText(records[index][2])},
+            parentElement:record,
+            focus() { document.activeElement=this; },
+          },
+        };
+        return button;
+      });
       if (change==='disabled') for (const child of this.children) child.disabled=true;
     },
   }]));
   document.getElementById=id=>nodes[id];
   const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
-  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`,{...panel,document});
+  const syncRoom=source.slice(source.indexOf('function syncWorkRoom()'),source.indexOf('function activeRoom()'));
+  const board=runInNewContext(`${rendering}\n${boardSource}\n${syncRoom}\n({renderTasks,acceptTaskPoll,resetTaskFilters,syncWorkRoom,snapshot:()=>taskSnapshot})`, {
+    ...panel, document, workRoom:room, activeRoom:()=>room, workLoop:{setRoom(){}},
+    showLoading() { nodes.tasks.innerHTML = ""; nodes.attention.innerHTML = ""; },
+  });
   const row={task_id:'north::'+wi,fleet:'north / web',title:'Review release',state:'queued',attention:false};
   const env=tasks=>({state:'ok',data:{tasks}});
   board.renderTasks(env([row]));
+  return {board, document, nodes, env, row, selectRoom: value => { room = value; }};
+}
+
+for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal',
+    'record-open', 'record-lane', 'record-closed', 'record-peer', 'record-reset', 'record-unavailable', 'record-elsewhere'])
+test(`task board refresh preserves exact keyboard position without stealing focus: ${change}`, () => {
+  const watchRecord = change.startsWith('record');
+  const {board, document, nodes, env, row} = taskBoardFocusHarness(change);
   const original=nodes.tasks.children[0]; original.disabled=false;original.focus();
+  if (watchRecord) { original.record.open = change !== 'record-closed'; original.summary.focus(); }
   const outside={id:change==='modal'?'task-detail-close':'work-body'};
-  if (['elsewhere','modal'].includes(change)) document.activeElement=outside;
+  if (['elsewhere','modal','record-elsewhere'].includes(change)) document.activeElement=outside;
+  if (change === 'record-reset') { board.resetTaskFilters(); assert.equal(original.record.open, false); }
   if (change==='hidden') nodes.tasks.hidden=true;
   const peer={...row,task_id:change==='source'?'south::'+wi:row.task_id,fleet:'south / web'};
-  board.renderTasks(change==='unavailable'?{state:'unavailable'}:env(['removed','source'].includes(change)?[peer]
-    : [peer,{...row,attention:change==='lane'}]));
+  board.renderTasks(['unavailable','record-unavailable'].includes(change)?{state:'unavailable'}:env(['removed','source','record-peer'].includes(change)?[peer]
+    : [peer,{...row,attention:['lane','record-lane'].includes(change)}]));
+  if (watchRecord) {
+    const buttons = [...nodes.attention.children, ...nodes.tasks.children];
+    const matching = buttons.find(button => button.dataset.taskFleet === row.fleet);
+    const other = buttons.find(button => button.dataset.taskFleet === peer.fleet);
+    if (other) assert.equal(other.record.open,false);
+    if (matching) assert.equal(matching.record.open,!['record-closed','record-reset'].includes(change));
+    const expected = change === 'record-elsewhere' ? outside : ['record-peer','record-reset','record-unavailable'].includes(change) ? nodes.tasks : matching.summary;
+    assert.equal(document.activeElement,expected);
+    return;
+  }
   if (['elsewhere','modal'].includes(change)) assert.equal(document.activeElement,outside);
   else if (['removed','source','unavailable','disabled'].includes(change)) {
     assert.equal(document.activeElement,nodes.tasks); assert.equal(nodes.tasks.tabIndex,-1);
@@ -821,12 +865,43 @@ test(`task board refresh preserves exact keyboard position without stealing focu
   }
 });
 
+for (const outcome of ['returns', 'initially-unavailable', 'refused', 'focus-moved', 'room-changed', 'session-paused'])
+test(`a task record whose source is still checking: ${outcome}`, () => {
+  const {board, document, nodes, row, selectRoom} = taskBoardFocusHarness();
+  const peer = {...row, task_id:'south::' + wi, fleet:'south / web'};
+  const reply = (tasks, status, state = 'ok') => ({state, data:{tasks,
+    sources:[{key:'north',state:status}, {key:'south',state:'ok'}]}});
+  const opened = nodes.tasks.children[0];
+  opened.record.open = true;
+  opened.summary.focus();
+  const read = {};
+  board.acceptTaskPoll(outcome === 'initially-unavailable' ? reply([], 'checking', 'unavailable') : reply([peer], 'checking'), false, read);
+  assert.ok(!nodes.tasks.children.some(button => button.dataset.taskOpen === row.task_id));
+  assert.equal(document.activeElement, nodes.tasks);
+  const outside = {id:'new-focus'};
+  if (outcome === 'focus-moved') document.activeElement = outside;
+  if (outcome === 'room-changed') {
+    selectRoom('another room');
+    assert.equal(board.syncWorkRoom(), true);
+    assert.equal(board.snapshot(), null, 'an implicit room change retires the filter snapshot');
+  }
+  if (outcome === 'session-paused') board.resetTaskFilters();
+  if (outcome === 'refused') {
+    board.acceptTaskPoll(reply([peer], 'denied'), true, read);
+    assert.equal(nodes.tasks.children[0].record.open,false);
+  }
+  board.acceptTaskPoll(reply([row, peer], 'ok'), true, read);
+  const [restored, other] = nodes.tasks.children;
+  assert.equal(other.record.open, false);
+  assert.equal(restored.record.open, ['returns','initially-unavailable','focus-moved'].includes(outcome));
+  const expected = outcome === 'focus-moved' ? outside : restored.record.open ? restored.summary : nodes.tasks;
+  assert.equal(document.activeElement,expected);
+});
+
 // Merge gate (document 03): once a team is ready the frame shows this connected view, so every bot-written field it
 // draws must stay plain text. Each field carries markup; the rendered tag sequence must match a render of ordinary
 // words, no img, a, form or input is made from it, and its literal text is visible.
 const HOSTILE = '<img src=x onerror=1><a href="https://example.invalid">link</a><form><input></form>';
-const visibleText = html => html.replace(/<[^>]*>/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-  .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
 const tagSequence = html => [...html.matchAll(/<\/?([a-zA-Z][\w-]*)/g)].map(m => m[0].toLowerCase());
 async function renderWorkingView(value) {
   const made = [], byId = new Map();

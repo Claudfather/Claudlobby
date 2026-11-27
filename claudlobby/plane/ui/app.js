@@ -642,13 +642,13 @@ function refreshTaskHistory() {
   clearTaskHistory();
   void refreshBoards();
 }
-function acceptTaskPoll(env, settled = true) {
+function acceptTaskPoll(env, settled = true, recordState) {
   if (taskHistoryHeld) {
     if (!settled) return taskSnapshot;
     if (env?.state === "ok" && taskWindowIdentity(env) === taskWindowIdentity(taskSnapshot)) return taskSnapshot;
     taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
   }
-  renderTasks(env);
+  renderTasks(env, settled, recordState);
   return env;
 }
 function canLoadOlderTasks(data) {
@@ -712,6 +712,9 @@ function taskAssigneeKey(task) {
 function resetTaskFilters() {
   taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
   taskFilters = {status:"",assignee:""}; taskSnapshot = null;
+  for (const rail of [$("attention"), $("tasks")]) {
+    for (const summary of openTaskSummaries(rail)) summary.parentElement.open = false;
+  }
   paintTaskFilters([],false);
   paintTaskHistory(null);
 }
@@ -740,27 +743,59 @@ function paintTaskFilters(rows, available) {
   assignee.onchange = () => { taskFilters.assignee = assignee.value; repaint(); };
   reset.onclick = () => { taskFilters = {status:"",assignee:""}; repaint(); };
 }
-function renderTasks(env) {
+function openTaskSummaries(rail) {
+  return rail?.querySelectorAll?.(".task-record[open] > summary[data-task-record]") || [];
+}
+function renderTasks(env, settled = true, recordState) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
-  taskSnapshot = env?.state === "ok" ? env : null;
-  paintTaskHistory(env);
-  paintTaskFilters(env?.state === "ok" ? env.data.tasks : [],env?.state === "ok");
+  const rails = [attEl, taskEl];
+  const ok = env?.state === "ok";
+  const carried = recordState?.version === taskHistoryVersion ? recordState : null;
+  const sameBoard = taskSnapshot || carried;
+  const expanded = new Set(carried?.expanded);
+  if (taskSnapshot) {
+    for (const rail of rails) {
+      for (const summary of openTaskSummaries(rail)) expanded.add(summary.dataset.taskRecord);
+    }
+  }
+  const recordKey = (fleet, id) => JSON.stringify([fleet || "", id]);
   const focused = document.activeElement;
-  const focusedRail = [attEl, taskEl].find(el => el.contains?.(focused));
-  const identity = focusedRail && focused?.dataset?.taskOpen
-    ? {id:focused.dataset.taskOpen, fleet:focused.dataset.taskFleet || ""} : null;
+  const focusedRail = rails.find(el => el.contains?.(focused));
+  const summaryKey = (focusedRail && focused?.dataset?.taskRecord) || (carried?.rail === focused ? carried?.focus : null);
+  const identity = summaryKey || (focusedRail && focused?.dataset?.taskOpen
+    ? recordKey(focused.dataset.taskFleet, focused.dataset.taskOpen) : null);
+
+  // One aggregate read draws checking sources as they settle. Carry only keys
+  // for those sources. Every displayed task still comes from the current reply.
+  const checking = settled ? [] : (env?.data?.sources || []).filter(s => s.state === "checking").map(s => s.key + "::");
+  const sourceStillChecking = key => {
+    if (!checking.length) return false;
+    const [, taskId] = JSON.parse(key);
+    return typeof taskId === "string" && checking.some(prefix => taskId.startsWith(prefix));
+  };
+  if (recordState) {
+    recordState.version = taskHistoryVersion;
+    recordState.expanded = [...expanded].filter(sourceStillChecking);
+    recordState.focus = recordState.rail = null;
+  }
+  taskSnapshot = ok ? env : null;
+  paintTaskHistory(env);
+  paintTaskFilters(ok ? env.data.tasks : [], ok);
   const restoreFocus = () => {
-    if (!identity) return; // A board refresh never takes focus from elsewhere.
+    if (!identity) return;
     const available = el => el?.isConnected && !el.hidden && !el.disabled && !el.closest("[hidden]");
-    const replacement = [attEl, taskEl].flatMap(el => [...el.querySelectorAll("[data-task-open]")])
-      .find(button => button.dataset.taskOpen === identity.id
-        && (button.dataset.taskFleet || "") === identity.fleet && available(button));
-    const destination = replacement || [focusedRail, attEl, taskEl].find(available);
+    const button = rails.flatMap(el => [...el.querySelectorAll("[data-task-open]")])
+      .find(button => recordKey(button.dataset.taskFleet, button.dataset.taskOpen) === identity && available(button));
+    const replacement = summaryKey ? sameBoard && button?.parentElement.querySelector(".task-record > summary") : button;
+    const destination = replacement || [focusedRail, ...rails].find(available);
     if (!destination) return;
-    if (!replacement) destination.tabIndex = -1;
+    if (!replacement) {
+      destination.tabIndex = -1;
+      if (summaryKey && recordState && sourceStillChecking(summaryKey)) { recordState.focus = summaryKey; recordState.rail = destination; }
+    }
     destination.focus();
   };
-  const coverage = env?.state === "ok" ? env.data?.coverage : null;
+  const coverage = ok ? env.data?.coverage : null;
   const partial = coverage?.partial === true;
   if (renderState(taskEl, env,
                   { idleWhenEmpty: (d) => !taskFilters.status && !taskFilters.assignee && !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
@@ -807,12 +842,13 @@ function renderTasks(env) {
     const priorCount = r.assignment_count - (a ? 1 : 0);
     const prior = priorCount > 0
       ? `<div class="note">${priorCount} prior assignment(s)</div>` : "";
+    const key = recordKey(r.fleet, r.task_id);
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
       <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || "Untitled task")}</button>
       <div class="sub">${esc(who)}`
       + `${when ? ` · ${esc(when)}` : ""}</div>`
-      + `<details class="task-record"><summary>Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}${assignmentCommands(r.attention_reason)}</details>`
+      + `<details class="task-record"${expanded.has(key) ? " open" : ""}><summary data-task-record="${esc(key)}">Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}${assignmentCommands(r.attention_reason)}</details>`
       + taskIssueNote(r) + attentionWhy(r) + nudgeNote(r)
       + `</div>`;
   };
@@ -1461,8 +1497,9 @@ async function refreshBoards() {
   const conversation = Promise.all([
     panel(channelUrl(), value => { renderChannel(value); workLoop.updateChannel(value); }),
     (async () => {
-      const value = await jget("/api/tasks" + q, partial => { if (current()) acceptTaskPoll(partial,false); });
-      return current() ? acceptTaskPoll(value,true) : value;
+      const recordState = {};
+      const value = await jget("/api/tasks" + q, partial => { if (current()) acceptTaskPoll(partial,false,recordState); });
+      return current() ? acceptTaskPoll(value,true,recordState) : value;
     })(),
   ]).then(([ch, tk]) => {
     // Partial paints never replace the work-loop's paired canonical snapshots.
@@ -1763,12 +1800,16 @@ function applyFleetVisibility() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
-  if (currentFleet !== f && typeof resetTaskFilters === "function") resetTaskFilters();
-  if (currentFleet !== f && typeof closeRoomBot === "function") closeRoomBot();
-  if (currentFleet !== f && typeof resetConversationFocus === "function") resetConversationFocus();
-  if (currentFleet !== f) { ++generation; closeEquipment(); }
+  const pickChanged = currentFleet !== f;
+  if (pickChanged) {
+    if (typeof closeRoomBot === "function") closeRoomBot();
+    if (typeof resetConversationFocus === "function") resetConversationFocus();
+    ++generation;
+    closeEquipment();
+  }
   currentFleet = f;
-  syncWorkRoom();
+  // An explicit pick can select the same room the roster already inferred.
+  if (!syncWorkRoom() && pickChanged && typeof resetTaskFilters === "function") resetTaskFilters();
   savePick(currentFleet);
   renderFleetTabs();
   applyFleetVisibility();
@@ -2311,6 +2352,7 @@ let workRoom;
 function syncWorkRoom() {
   const room = activeRoom();
   if (workRoom === room) return false;
+  if (typeof resetTaskFilters === "function") resetTaskFilters();
   workRoom = room;
   workLoop.setRoom(room);
   showLoading();
