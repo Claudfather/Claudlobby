@@ -6,7 +6,10 @@
 # PostToolUse hook.
 #
 # Captures: tool_call. A Pre/PostToolUse payload carries no session lifecycle
-# field, so no session event can be derived here.
+# field, so no session event can be derived here. On a Skill call, tool_call
+# also carries skill: the name in the payload's tool_input.skill, as given, so
+# the plane can count which library skills run. The call's args are never
+# read: they can carry text the user wrote.
 # NOTE: context_warning and rate_limit are NOT available via the Claude Code
 # hook payload (PreToolUse/PostToolUse). Managers must use live checks for those.
 #
@@ -70,9 +73,17 @@ events = []
 def evt(etype, data):
     events.append(etype + '\t' + json.dumps(data, separators=(',', ':')))
 
-# Always emit a tool_call event for any hook invocation with a tool name
+# Always emit a tool_call event for any hook invocation with a tool name.
+# A Skill call also names its skill: tool_input.skill as given, when that is
+# a non-empty string. Its args are never read.
 if tool:
-    evt('tool_call', {'tool': tool, 'event': hook_event, 'session': session})
+    data = {'tool': tool, 'event': hook_event, 'session': session}
+    if tool == 'Skill':
+        tool_input = p.get('tool_input')
+        skill = tool_input.get('skill') if isinstance(tool_input, dict) else None
+        if isinstance(skill, str) and skill:
+            data['skill'] = skill
+    evt('tool_call', data)
 
 # MCP tool errors are not observable from this hook. A failing tool call —
 # including an MCP server returning isError — fires the PostToolUseFailure
