@@ -1,10 +1,14 @@
 """Tiny .env file parser used across the compositor.
 
 Hand-rolled because the .env files claudlobby reads are simple shell-style
-files, not the full POSIX env-var grammar. Two helpers:
+files, not the full POSIX env-var grammar. Helpers:
 
   - read(path)               → parse to dict, strips `export ` prefix and quotes
   - format_file(header, vars) → render `export VAR=<quoted>` lines for writing
+  - _write_config(...)       → the one private writer: 0600 temp file, fsync,
+                               atomic replace (shared with fleet setup)
+  - refuse_unsafe_destination(path) → refuse a symlink or non-regular file
+                               before any private write
 
 Lives in its own module so __main__ (migration env writer) and validator
 (env-presence checker) can both import without circularity.
@@ -115,4 +119,9 @@ def _write_config(destination: Path, content: bytes, *, replace: bool, prefix: s
 def refuse_unsafe_destination(path: Path) -> None:
     """Refuse a private write over a symlink or a non-regular file; nothing is touched."""
     if path.is_symlink() or (path.exists() and not path.is_file()):
-        raise CommandFailure("conflict", f"conflict: {path} is not a regular file; left unchanged")
+        kind = "a symlink" if path.is_symlink() else "not a regular file"
+        raise CommandFailure(
+            "conflict",
+            f"conflict: {path} is {kind}; left unchanged",
+            hint="replace it with a regular file (copy the values in), then run the command again",
+        )

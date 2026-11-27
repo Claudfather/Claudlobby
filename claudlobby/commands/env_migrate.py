@@ -170,7 +170,7 @@ def _apply_env_migration(
                 merged,
             ).encode("utf-8"),
             replace=True,
-            prefix=".env-",
+            prefix=".env.tmp-",
         )
         log.info(
             "wrote %s (%d migrated, %d total)",
@@ -197,7 +197,7 @@ def _apply_env_migration(
                 merged,
             ).encode("utf-8"),
             replace=True,
-            prefix=".env-",
+            prefix=".env.tmp-",
         )
         bot_count += 1
         log.info(

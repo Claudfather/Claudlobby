@@ -3955,7 +3955,7 @@ def _scaffold_env_merge(
                 lines.append(f"export {ev.name}=")
 
     dotenv._write_config(
-        env_path, ("\n".join(lines) + "\n").encode("utf-8"), replace=True, prefix=".env-"
+        env_path, ("\n".join(lines) + "\n").encode("utf-8"), replace=True, prefix=".env.tmp-"
     )
     if new_vars:
         new_names = ", ".join(ev.name for ev in new_vars)
@@ -4056,6 +4056,27 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
                 f"(a stub here would blank it); set it in the {ev.default_tier} .env"
             )
 
+    # The bots whose own .env gets stubs. A var whose equipment a bot attaches
+    # ITSELF goes only to that bot. One with no attaching bot is fleet-wide
+    # equipment carrying a per-bot value (a Telegram token: one BotFather bot
+    # per bot) and still goes to every bot, as before.
+    bot_targets = []
+    if bot_vars:
+        for bot_name in fleet.bots:
+            mine = [
+                ev
+                for ev in bot_vars
+                if not ev.bot_attached or bot_name in ev.bot_attached
+            ]
+            if mine:
+                bot_targets.append((bot_name, mine))
+
+    # Refuse an unsafe destination before any .env is written, as env migrate does.
+    if paths.fleet_dir:
+        dotenv.refuse_unsafe_destination(paths.fleet_dir / ".env")
+    for bot_name, _ in bot_targets:
+        dotenv.refuse_unsafe_destination(paths.bot_runtime(bot_name) / ".env")
+
     if paths.fleet_dir:
         # Guarded exactly as the bot tier is (#1206). start-bot.sh sources the
         # fleet tier AFTER $HOME/.env and the repo-root .env, so an empty fleet
@@ -4071,7 +4092,7 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
             provided_upstream=_upstream_env_names(paths, for_tier="fleet"),
         )
 
-    if bot_vars:
+    if bot_targets:
         # Vars already carrying a real value upstream must not be re-stubbed live
         # at the bot tier — start-bot.sh sources the bot tier last, so an empty
         # export would win over the operator's actual value. Unchanged, and it
@@ -4079,18 +4100,7 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
         # the most specific tier there is, where a bare stub outranks every
         # other assignment of that key on the machine.
         upstream = _upstream_env_names(paths)
-        for bot_name in fleet.bots:
-            # A var whose equipment this bot attaches ITSELF goes only here. One
-            # with no attaching bot is fleet-wide equipment carrying a per-bot
-            # value (a Telegram token: one BotFather bot per bot) and still goes
-            # to every bot, as before.
-            mine = [
-                ev
-                for ev in bot_vars
-                if not ev.bot_attached or bot_name in ev.bot_attached
-            ]
-            if not mine:
-                continue
+        for bot_name, mine in bot_targets:
             _scaffold_env_merge(
                 paths.bot_runtime(bot_name) / ".env",
                 f"# Bot environment for: {bot_name}",

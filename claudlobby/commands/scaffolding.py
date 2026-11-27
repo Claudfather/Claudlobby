@@ -137,7 +137,7 @@ def cmd_new_bot(args):
                         if paths.env_file.is_file() else "")
             _write_config(paths.env_file, env_text_with_token(
                 existing, inp.token_env, inp.telegram_token).encode("utf-8", "surrogateescape"),
-                replace=True, prefix=".env-")
+                replace=True, prefix=".env.tmp-")
         _write_config(paths.fleet_yaml, new_text.encode("utf-8"), replace=True)
     except OSError as exc:
         raise CommandFailure("unavailable", "bot source write did not complete; inspect authored files") from exc

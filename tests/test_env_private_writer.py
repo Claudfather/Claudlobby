@@ -13,6 +13,7 @@ from claudlobby import dotenv
 from claudlobby.command_result import CommandFailure
 from claudlobby.commands import env_migrate
 from claudlobby.commands.setup import _sync_parent, _write_config
+from claudlobby import composer
 from claudlobby.composer import EnvVar, _scaffold_env_merge
 
 
@@ -160,3 +161,29 @@ def test_scaffold_failed_write_leaves_old_file_whole(tmp_path, monkeypatch):
         _scaffold_env_merge(env, "# header", _stub())
     assert env.read_text() == "export EXISTING=secret\n"
     assert [p.name for p in tmp_path.iterdir()] == [".env"]
+
+
+def test_scaffold_files_refuse_before_any_write(tmp_path, monkeypatch):
+    """A symlinked bot .env stops scaffolding before the fleet .env is touched."""
+    paths = _paths(tmp_path)
+    paths.fleet_dir.mkdir()
+    fleet_env = paths.fleet_dir / ".env"
+    fleet_env.write_text("export KEEP=1\n")
+    before = fleet_env.read_bytes()
+    runtime = paths.bot_runtime("worker")
+    runtime.mkdir(parents=True)
+    (tmp_path / "elsewhere").write_text("export OTHER=1\n")
+    (runtime / ".env").symlink_to(tmp_path / "elsewhere")
+    contract = [
+        EnvVar(name="FLEET_VAR", description="f", default_tier="fleet", source="x"),
+        EnvVar(name="BOT_VAR", description="b", default_tier="bot", source="x"),
+    ]
+    monkeypatch.setattr(composer, "collect_env_contracts", lambda fleet, paths: contract)
+    monkeypatch.setattr(composer, "_upstream_env_names", lambda *a, **k: frozenset())
+    fleet = SimpleNamespace(name="example", bots=["worker"])
+    with pytest.raises(CommandFailure) as caught:
+        composer.scaffold_env_files(fleet, paths)
+    assert "symlink" in caught.value.error.message
+    assert fleet_env.read_bytes() == before
+    assert (tmp_path / "elsewhere").read_text() == "export OTHER=1\n"
+    assert [p.name for p in paths.fleet_dir.iterdir()] == [".env"]
