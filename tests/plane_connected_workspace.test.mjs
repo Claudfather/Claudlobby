@@ -2639,12 +2639,12 @@ function framedPage(ui) {
 }
 // One localStorage per test, restored once after every landing in it closes (t.after runs first-in, first-out).
 const landingStorage=new WeakMap();
-function landing(t,{bound=landingRefs[0].reference_id,browser=true,attention=[],references=landingRefs,metadata}={}) {
+function landing(t,{bound=landingRefs[0].reference_id,browser=true,attention=[],references=landingRefs,metadata,auto=false,createClient}={}) {
   if(!landingStorage.has(t)){const restore=stubLocalStorage();landingStorage.set(t,[]);t.after(()=>{for(const close of landingStorage.get(t))close();restore();});}
   const h=harness({references}),frame=framedPage(h.ui),carrier=browser?browserCarrier(h,bound):null;
   if(metadata)h.metadata=metadata;
   if(browser)h.api.dispose();
-  const workspace=browser?createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch}):h.api;
+  const workspace=browser?createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch,connectOnHandoff:auto,...(createClient?{createClient}:{})}):h.api;
   landingStorage.get(t).push(()=>workspace.dispose()); // the guide keeps its saved setup in localStorage, as in a browser
   workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session'),onConnectionAttention:event=>attention.push(event)});
   const cards=()=>h.ui.get('owner-session').children.filter(e=>e.className==='connection-card');
@@ -2784,6 +2784,60 @@ test('a panel disposed during the approval read moves no focus',async()=>{
 });
 
 
+// Connecting by itself, once: the browser carrier's first connect follows the website's hand-off. Nothing else ever
+// connects without a press.
+const connects=l=>l.h.calls.filter(c=>c.url.endsWith('/api/owner/connected/challenge')).length;
+const settle=async l=>{await l.workspace.checkAccount();await flush();};
+const aState=l=>l.workspace.snapshot().computers[0].state;
+test('the browser carrier connects its bound computer once by itself when it is admitted, ready and not connected',async t=>{
+  const l=landing(t,{auto:true});await settle(l);
+  assert.equal(connects(l),1);assert.equal(aState(l),'ready');
+  l.h.timer(30000);await flush();l.workspace.checkAccount();await flush();
+  assert.equal(connects(l),1,'never a second connect');
+});
+test('a hidden page does not connect by itself, and connects once when it becomes visible',async t=>{
+  const l=landing(t,{auto:true});l.h.ui.document.visibilityState='hidden';await settle(l);
+  assert.equal(connects(l),0);assert.notEqual(aState(l),'ready');
+  l.h.ui.document.visibilityState='visible';l.h.ui.listeners.get('visibilitychange')();await flush();
+  assert.equal(connects(l),1);assert.equal(aState(l),'ready');
+  l.h.ui.listeners.get('visibilitychange')();await flush();assert.equal(connects(l),1,'once only');
+});
+test('outside the browser carrier nothing connects by itself',async t=>{
+  const l=landing(t,{browser:false});await settle(l);
+  assert.equal(connects(l),0);assert.notEqual(aState(l),'ready');
+  const other=landing(t,{auto:true,bound:null});await settle(other);assert.equal(connects(other),0,'a carrier that bound no computer connects none');
+});
+test('after a failed connect, an unknown outcome or a denial the view never connects by itself again',async t=>{
+  const origin=landingRefs[0].endpoint_origin;
+  for(const [name,answer] of [['failure',()=>reply(503,{})],['unknown outcome',()=>{throw new Error('lost');}],['denial',()=>reply(403,{state:'denied'})]]){
+    const l=landing(t,{auto:true});l.h.overrides.set(origin+'/api/owner/connected/challenge',answer);
+    await settle(l);assert.equal(connects(l),1,name);
+    l.h.timer(30000);await flush();await settle(l);
+    l.workspace.snapshot();assert.equal(connects(l),1,name+': no second connect');assert.notEqual(aState(l),'ready',name);
+  }
+});
+test('the one-shot latch holds even when the read keeps saying not connected',async t=>{
+  let presses=0;
+  const createClient=options=>{const client=createConnectedReadClient(options);
+    return {...client,connectionState:()=>presses>3?'checking':'not_connected',connect:async()=>{presses++;return false;}};};
+  const l=landing(t,{auto:true,createClient});await settle(l);console.log(l.workspace.snapshot().phase,l.workspace.snapshot().computers.map(c=>c.state));
+  assert.equal(presses,1);
+  for(let i=0;i<3;i++){l.h.timer(30000);await flush();await settle(l);l.h.ui.listeners.get('visibilitychange')();await flush();}
+  assert.equal(presses,1,'a read that stays not connected never connects again');
+});
+test('after an expiry the view never connects by itself again; a press does',async t=>{
+  const l=landing(t,{auto:true});await settle(l);assert.equal(connects(l),1);
+  l.h.time=900000;l.h.timer(900000);await flush();await settle(l);
+  assert.equal(aState(l),'unavailable');assert.equal(connects(l),1,'a tab left open does not hold the session');
+  assert.equal(await l.workspace.act(0,'connect'),true);assert.equal(connects(l),2,'only a press');
+});
+test('after Disconnect the view never connects by itself again',async t=>{
+  const l=landing(t,{auto:true});await settle(l);assert.equal(aState(l),'ready');
+  await l.workspace.act(0,'logout');await flush();await settle(l);
+  l.h.ui.listeners.get('visibilitychange')();await flush();
+  assert.equal(connects(l),1);assert.notEqual(aState(l),'ready');
+  assert.equal(await l.workspace.act(0,'connect'),true);assert.equal(connects(l),2,'only a press');
+});
 test('a refused Connect from the panel keeps Connect, says why, and returns focus to it without retrying',async t=>{
   const l=landing(t);await l.workspace.checkAccount();await flush();
   l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/challenge',()=>reply(503,{}));
@@ -2911,7 +2965,7 @@ test('setup-only view posts its content height to the exact shell origin, once p
 test('a framed setup-only view without ResizeObserver still announces ready and posts no size',async t=>{
   const restore=stubLocalStorage(),h=harness({references:landingRefs}),frame=framedPage(h.ui),carrier=browserCarrier(h,landingRefs[0].reference_id);
   h.api.dispose();delete frame.view.ResizeObserver;
-  const workspace=createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch});t.after(()=>{workspace.dispose();restore();});
+  const workspace=createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch,connectOnHandoff:false});t.after(()=>{workspace.dispose();restore();});
   workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});await workspace.checkAccount();await flush();
   assert.deepEqual(frame.posts,[[{type:'claudfather.workspace.ready',version:1},documentContext.shell_origin],
     [{type:'claudfather.workspace.form',version:1,form:'setup'},documentContext.shell_origin]]);

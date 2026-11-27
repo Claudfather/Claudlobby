@@ -205,7 +205,9 @@ and genuine read handles; account metadata alone never admits private reads.
 
 Zero saved computers has an explicit empty state. One or two saved computers
 start with read-only session checks, leaving explicit Connect available; no
-automatic sign-in, session mutation retry or host initialization occurs. Per-host
+automatic sign-in, session mutation retry or host initialization occurs, with one
+exception: in the browser-carrier frame the first connect may follow the website's
+hand-off (see "The setup-only view" below). Per-host
 Connect, Check connection, Keep connected and Disconnect operate independently.
 Disconnect ends only that connected session; closing the document disposes its
 streams/credentials without sending logout. Stable controls preserve keyboard
@@ -239,9 +241,14 @@ with its content and has no internal scroll container, and the panel fills the
 frame width. The bound computer's panel is the view in every connection state,
 except that a started computer shows its parts instead ("A started computer's parts").
 Its first step, Connect this computer, mirrors that computer's own Connect or
-Check connection. One click sends one connect. Nothing connects, signs in or
-retries a session mutation automatically, and failures say what to choose next
-in plain sentences. After Connect, the existing steps follow: approve setup,
+Check connection. One click sends one connect. The first connect may follow the
+website's hand-off by itself, once, when the bound computer is admitted, the
+account check is ready, the read says not connected and the page is visible (a
+hidden page waits, still at most once). Every retry, and every connect after an
+expiry, a failure, an unknown outcome, a denial or Disconnect, stays a press: a
+tab left open must not hold the computer's session forever, and computers cap
+sessions. Nothing else connects, signs in or retries a session mutation
+automatically, and failures say what to choose next in plain sentences. After Connect, the existing steps follow: approve setup,
 sign in to Claude, describe the goal, launch. When the computer is still in
 first-team setup (`setup_only`), a Connect chosen in the panel is followed by one
 setup approval read (`context`, which changes nothing on the computer), so
