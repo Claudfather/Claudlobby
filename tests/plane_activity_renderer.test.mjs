@@ -590,6 +590,24 @@ test('unavailable report content does not become status or evidence, legacy rema
 });
 
 
+test('the attention section distinguishes a paused task from a question for the reader', async () => {
+  const shell = await readFile(new URL('../claudlobby/plane/ui/index.html', import.meta.url), 'utf8');
+  assert.match(shell, /<h2>Needs attention <span id="attn-count"/);
+  const reasons = source.slice(source.indexOf('const WHY ='), source.indexOf('// An OUTSTANDING nudge'));
+  const describe = runInNewContext(reasons + '\nattentionWhy', {...panel, ago: () => '5m ago'});
+  const blocked = {attention: true, attention_reason: ['blocked_waiting']};
+  const paused = describe(blocked);
+  assert.match(paused, /Work paused — <small>/);
+  assert.match(paused, /Open the task to read the latest update\./);
+  assert.doesNotMatch(paused, /waiting on you|claudlobby --/);
+  assert.match(describe({...blocked, attention_since: '2026-01-01T00:00:00Z'}), /Work paused 5m ago/);
+  const overdue = describe({...blocked, attention_reason: ['overdue', 'blocked_waiting'],
+    attention_since: '2026-01-01T00:00:00Z'});
+  assert.match(overdue, /Work paused — <small>/);
+  const asked = describe({attention: true, attention_reason: ['escalated'], attention_question: 'Which step needs review?'});
+  assert.match(asked, /needs you: Which step needs review\?/);
+});
+
 test('permission attention opens the existing task and clears after a fresh decided read', () => {
   const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
   const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
@@ -664,7 +682,9 @@ test('older task browsing survives polls, deduplicates qualified rows and refres
     sessionPaused:false,sessionEpoch:1,currentFleet:'all',fleetQuery:()=>'',refreshBoards(){refreshes++;},
     async jget(url){calls++;assert.equal(url,'/api/tasks?cursor=older');return env([row('north::'+wi,'Repeated'),row('south::'+wi,'Older peer')],'older',null);}});
   board.renderTasks(recent);assert.equal(nodes['task-load-older'].hidden,false);
+  assert.match(nodes['task-history-count'].textContent,/^1 task loaded\./);
   await board.loadOlderTasks();assert.equal(calls,1);
+  assert.match(nodes['task-history-count'].textContent,/^2 tasks loaded\./);
   assert.match(nodes.tasks.innerHTML,/Recent/);assert.match(nodes.tasks.innerHTML,/Older peer/);assert.doesNotMatch(nodes.tasks.innerHTML,/Repeated/);
   board.acceptTaskPoll(env([row('north::new','Polled')],null,'newer'),true);
   assert.match(nodes.tasks.innerHTML,/Older peer/);assert.doesNotMatch(nodes.tasks.innerHTML,/Polled/);
