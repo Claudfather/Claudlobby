@@ -818,7 +818,8 @@ def test_the_installer_sent_as_one_argument_stays_within_the_websites_margin():
     # bound here makes a change that would fail there fail in this repository first.
     escaped = SCRIPT.read_bytes().replace(b"'", b"'\\''")
     longest = max(len(prefix + b"sh -c '" + escaped + b"' host-install " + verb) + 1
-                  for verb in (b"prepare", b"status", b"update-status", b"update", b"update-continue")
+                  for verb in (b"prepare", b"status", b"update-status", b"update", b"update-continue",
+                               b"start-again-status", b"start-again")
                   for prefix in (b"", b"/bin/"))
     assert longest <= 131072 - 4096, f"installer command is {longest} bytes; the bound is {131072 - 4096}"
 
@@ -1395,7 +1396,9 @@ def _bashes():
 
 @pytest.mark.parametrize("action, operation", [("update-status", "host-update-status-v1"),
                                                ("update", "host-update-v1"),
-                                               ("update-continue", "host-update-continue-v1")])
+                                               ("update-continue", "host-update-continue-v1"),
+                                               ("start-again-status", "host-start-again-status-v1"),
+                                               ("start-again", "host-start-again-v1")])
 def test_the_shell_answers_each_update_action_in_its_own_names(tmp_path, action, operation):
     text = SCRIPT.read_text()
     # The portable head: the operation is named, then a refusal in the action's own keys.
