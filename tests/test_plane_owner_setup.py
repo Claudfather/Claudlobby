@@ -1140,7 +1140,7 @@ def test_typed_fresh_guide_keeps_pairing_before_workspace_storage(team_setup, mo
         else:
             assert owner.active and "--bootstrap-pairing-origin" not in command
             assert access.connected().preparation_state() == "ready"
-            codes["workspace"] = proposed((access, access.workspace(), owner, [access._now()])).nonce
+            codes["workspace"] = proposed((access, access.workspace(), owner, None)).nonce
         yield SimpleNamespace()
     monkeypatch.setattr(guide, "_serving", serving)
     profile = SimpleNamespace(prepare_directories=lambda *_: None, prepare_provider=lambda *_: None, origin=lambda: config["origin"],
@@ -2845,7 +2845,7 @@ def test_the_guide_wire_keeps_todays_frames_and_the_marked_team_card_answer_name
             codes["pairing"] = access.begin_pairing(OWNER).token
             yield SimpleNamespace()
             return
-        codes["workspace"] = proposed((access, access.workspace(), owner, [access._now()])).nonce
+        codes["workspace"] = proposed((access, access.workspace(), owner, None)).nonce
         class Child:
             def wait(self, timeout):
                 connected = access.connected()
