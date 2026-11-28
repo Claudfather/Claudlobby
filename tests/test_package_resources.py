@@ -792,7 +792,8 @@ def test_setup_handoff_refuses_incompatible_or_unbound_entry_before_exec(tmp_pat
     with pytest.raises(InstallationError):setup_handoff_argv(installation,data)
 
 
-@pytest.mark.parametrize("change", ["malformed", "duplicate", "replacement", "health", "maintenance", "refused"])
+@pytest.mark.parametrize("change", ["malformed", "duplicate", "replacement", "health", "maintenance", "refused",
+                                    "stage_error"])
 def test_setup_wait_refuses_unknown_or_unhealthy_status_without_runtime_import(tmp_path, change):
     installation = _stable_launcher(tmp_path)
     record = {"schema": 1, "request_id": _SETUP_BINDING[1], "target": _SETUP_BINDING[3],
@@ -804,6 +805,8 @@ def test_setup_wait_refuses_unknown_or_unhealthy_status_without_runtime_import(t
         record["health_errors"] = {"fixture": "not ready"}
     elif change == "maintenance":
         record["maintenance"] = True
+    elif change == "stage_error":
+        record["stage_error"] = "fixture stage failed"
     payload = json.dumps({"read_only": True, "update": record})
     if change == "malformed":
         payload = "not JSON"
