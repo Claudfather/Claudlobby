@@ -448,13 +448,12 @@ def test_reap_removes_orphan_keeps_long_form(tmp_path):
 
 
 def test_selected_orphan_reap_is_operator_only_and_confined_to_declared_fleet(
-    tmp_path, monkeypatch
+    cold, monkeypatch,
 ):
     from claudlobby import supervision_reap
     from claudlobby.activation_state import ActivationError
-    from tests.fixtures.current_runtime import current_runtime
 
-    root, _, _, host = current_runtime.__wrapped__(tmp_path, monkeypatch)
+    root, _, _, host = cold
     for key in ('CLAUDLOBBY_ROOT', 'FLEET_ROOT', 'FLEET_NAME', 'CLAUDLOBBY_FLEET',
                 'BOT_ID', 'BOT_NAME', 'BOT_DIR', 'BOT_SERVICE'):
         monkeypatch.delenv(key, raising=False)
