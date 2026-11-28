@@ -1,15 +1,19 @@
 """Finite local preparation using existing authority and foreground serving owners.
 
-No stored workflow, automatic approval, native enrollment or activation. The
-browser retains its explicit plan/launch/receipt protocol; the terminal stays open.
+No stored workflow, automatic approval, native enrollment or activation, with one
+exception: after a Launch whose team card was approved with the messages mark, the
+finish may run later on the stored card, with no one present (``_unattended_finish``
+in ``host_owner``). The browser retains its explicit plan/launch/receipt protocol;
+the terminal stays open.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 import http.client
 import json
 import hashlib
 import os
 from pathlib import Path
+import platform
 import socket
 import signal
 import shlex
@@ -17,6 +21,7 @@ import subprocess
 import stat
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -390,6 +395,43 @@ def _operation_retained(root, retained, record):
         hint=_continuation(root,retained.grant) if retained and retained.grant else "host update status")
 
 
+def _launch_handoff(setup, approved, retained):
+    if retained.launch_id is None:
+        return None
+    if retained.grant != approved:
+        raise CommandFailure("conflict", "setup approval changed before handoff; inspect the original receipt")
+    record = setup.operation(approved)
+    if (record is None or record["request_id"] != retained.launch_id
+            or record["config_fingerprint"] != retained.launch_plan):
+        raise CommandFailure("conflict", "original setup operation changed before handoff")
+    return {"state": "launch_handoff", "request_id": retained.launch_id, "config_fingerprint": retained.launch_plan,
+            "generation": approved.generation, "source_revision": approved.source_revision}
+
+
+@contextmanager
+def _finish_after_disconnect(paths, store, observed_approval):
+    """After serving has drained, a disconnect can still hand off this guide's committed Launch."""
+    from .owner_stdio import StdioRefused
+
+    try:
+        yield
+    except (KeyboardInterrupt, StdioRefused) as exc:
+        if isinstance(exc, StdioRefused) and exc.code not in {
+            "cancelled", "disconnected", "interrupted_unknown", "output_unavailable",
+        }:
+            raise
+        approved = observed_approval()
+        if approved is not None and approved.messages is not None:
+            try:
+                setup = OwnerSetup(store)
+                handoff = _launch_handoff(setup, approved, setup.retained_state())
+                if handoff is not None:
+                    start_computer_finish(paths, store, handoff)
+            except (Exception, KeyboardInterrupt):
+                pass  # Keep the original disconnect if its Launch cannot be proved.
+        raise
+
+
 @contextmanager
 def interrupted():
     """A direct SIGTERM follows the same owned cleanup as terminal cancellation."""
@@ -433,30 +475,47 @@ class _Halt(Exception):
         super().__init__(reason)
 
 
+def _finish_path(root, request_id, suffix):
+    return Path(root) / "state" / f"setup-finish-{request_id}.{suffix}"
+
+
 @contextmanager
 def _finish_lock(root, request_id):
     """One finish at a time per Launch: an exclusive flock on a private file in ``state/``, released
-    when the holder closes it or dies. Yields False, at once, when another process holds it."""
+    when the holder closes it or dies. On contention, give a status probe one brief chance to release it."""
     from ..plane.owner_setup import _uuid
     import fcntl
-    state = Path(root) / "state"
-    if not _uuid(request_id) or state.resolve() != state.absolute():
+    path = _finish_path(root, request_id, "lock")
+    if not _uuid(request_id) or path.parent.resolve() != path.parent.absolute():
         raise AccessUnavailable("setup finish lock is unavailable")
-    fd = os.open(state / f"setup-finish-{request_id}.lock",
+    fd = os.open(path,
                  os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
                 or stat.S_IMODE(info.st_mode) != 0o600):
             raise AccessUnavailable("setup finish lock is not a private regular file")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        for attempt in range(2):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if attempt == 0:
+                    time.sleep(0.01)
+        else:
             yield False
             return
         yield True
     finally:
         os.close(fd)
+
+
+def _read_goal_request(root, fleet_uid, request_id):
+    from ..request_queries import RequestNotFoundError, read_request
+    try:
+        return read_request(root, fleet_uid, request_id)
+    except RequestNotFoundError:
+        return None
 
 
 class _CardEffects:
@@ -501,11 +560,7 @@ class _CardEffects:
 
     def receipt(self, fleet_uid, request_id):
         """The retained request under ``request_id``, or None when none exists."""
-        from ..request_queries import RequestNotFoundError, read_request
-        try:
-            return read_request(self.paths.root, fleet_uid, request_id)
-        except RequestNotFoundError:
-            return None
+        return _read_goal_request(self.paths.root, fleet_uid, request_id)
 
     def send(self, alias, request_id, text, check):
         from .message_write import send_to_lead
@@ -520,13 +575,14 @@ def _preview_payload(conn, grant):
     return json.loads(row["payload"])
 
 
-def _keep(store, grant, value):
-    """Write the finish's record into the approval's Preview row, in its own transaction."""
+def _keep(store, grant, value, *, key="messages"):
+    """Write the finish's record (or, as ``finish``, who will finish) into the approval's Preview row,
+    in its own transaction."""
     with store._connection(write=True) as conn:
         OwnerSetup._schema(conn)
         payload = _preview_payload(conn, grant)
         conn.execute("UPDATE setup_previews SET payload=? WHERE generation=?",
-                     (json.dumps({**payload, "messages": value}), grant.generation))
+                     (json.dumps({**payload, key: value}), grant.generation))
     return value
 
 
@@ -611,12 +667,13 @@ def _admit(store, grant, ids, value):
 
 
 def _sent(view, value, text):
-    """``sent`` only for a receipt whose sender, recipient and body all match, with a submitted transport."""
+    """``sent`` reports sender submission for a matching receipt; receiver evidence is separate."""
     from ..message_payload import MessageBody
     from ..request_receipts import semantic_digest
     expected = semantic_digest({"body": MessageBody.from_input(text).text.encode("utf-8"), "kind": "chat"})
     if (view.operation != "message.send" or view.caller_uid != value["actor_uid"]
-            or view.recipient_uid != value["lead_uid"] or view.semantic_sha256 != expected):
+            or view.recipient_uid != value["lead_uid"] or view.semantic_sha256 != expected
+            or (value.get("by") == "computer" and view.provenance != {"carrier": "setup_finish"})):
         return {"state": "unknown", "reason": "request_id_taken"}
     if any(item.transport is not None and item.transport.status == "submitted" for item in view.transmissions):
         return {"state": "sent"}
@@ -688,6 +745,25 @@ def card_answer(store, grant, value):
     return answer
 
 
+def _unsettled(value):
+    """A record a later finish carries on: in progress, or allowed with its goal still ``pending`` (a
+    finish that ended between the checked transaction and the goal's record)."""
+    return value.get("state") == "in_progress" or (
+        value.get("state") == "allowed" and (value.get("goal") or {}).get("state") == "pending")
+
+
+def _pending_goal_status(root, launch_id, value, text):
+    """A cut-off finish may have committed a request before recording its outcome."""
+    goal = value["goal"]
+    try:
+        if goal["request_id"] != goal_request_id(launch_id):
+            return {"state": "unknown", "reason": "request_id_taken"}
+        view = _read_goal_request(root, value["fleet_uid"], goal["request_id"])
+        return goal if view is None else _sent(view, value, text)
+    except Exception:
+        return {"state": "unknown", "reason": "receipt_unavailable"}
+
+
 def card_status(store, retained):
     """For the status run and ``setup-status``: the marked approval's finish answer and launched goal."""
     grant = retained.grant if retained is not None else None
@@ -698,7 +774,15 @@ def card_status(store, retained):
         row = conn.execute("SELECT payload FROM setup_previews WHERE generation=?", (grant.generation,)).fetchone()
         payload = json.loads(row["payload"]) if row is not None else {}
     value = payload.get("messages")
-    return {"messages": card_answer(store, grant, value) if value is not None else None, "goal": payload.get("goal")}
+    finish = payload.get("finish")
+    if value is not None and _unsettled(value):
+        running = finish_running(store.root, retained.launch_id)
+        if not running and value["state"] == "allowed":
+            value = {**value, "goal": _pending_goal_status(store.root, retained.launch_id, value, payload.get("goal"))}
+        if _unsettled(value):
+            finish = {**(finish or {}), "running": running}
+    return {"messages": card_answer(store, grant, value) if value is not None else None, "goal": payload.get("goal"),
+            "finish": finish}
 
 
 def card_line(answer):
@@ -709,6 +793,196 @@ def card_line(answer):
     fields = (("state", answer.get("state")), ("reason", answer.get("reason")), ("by", answer.get("by")),
               ("alias", answer.get("alias")), ("goal", goal.get("state")), ("goal_reason", goal.get("reason")))
     return "setup_messages " + " ".join(f"{key}={value}" for key, value in fields if value is not None)
+
+
+# Who finishes a marked Launch (04b2). The service managers whose computers start the finish by
+# themselves: the one place that names a platform. Keyed as ``update_job`` keys its manager. A Mac
+# joins later through this same check, the same waiter argument and the same record (D23).
+COMPUTER_FINISH_MANAGERS = frozenset({"Linux"})
+#: A starter's environment never carries these: no bot or fleet selector, no sealed release.
+_STARTER_REFUSED = ("CLAUDLOBBY_RELEASE_ID", "CLAUDLOBBY_ARTIFACT_ID")
+
+
+#: The computer's own finish (the unattended ``--_finish-setup``) ends by itself this many seconds after
+#: it starts. What it waits for is bounded, and the longest is the goal's send (``deliver_bound_message``):
+#: the box read (5 s), the native send (30 s, then up to 3 s to stop it), the receipt wait (10 s) and at
+#: most two Enter repairs (15 s press, 12 s recheck each): about 110 s, plus 5 s for each busy Plane
+#: connection on the way. Twice that, rounded up. The page's and a terminal's finish have no deadline.
+UNATTENDED_FINISH_DEADLINE_S = 240
+_DEADLINE_EXIT = 124
+
+
+@contextmanager
+def unattended_deadline():
+    """Arm the unattended finish's deadline for the block. A daemon timer, not a signal: it fires whatever
+    the main thread is blocked in. At the deadline the process exits (``os._exit``) and releases its
+    lock. A native transport child already in its own session may still complete the original paste.
+
+    No second send: a strict owner send commits the request derived from the Launch before any native
+    effect. Status reads that receipt when the Finish stopped with a pending goal, and a later Finish
+    never sends when one exists. An unsettled attempt may have reached the lead."""
+    timer = threading.Timer(UNATTENDED_FINISH_DEADLINE_S, _deadline_reached)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
+
+
+def _deadline_reached():
+    """One key=value line to the finish's log, then out."""
+    try:
+        os.write(2, b"setup_finish state=deadline\n")
+    except OSError:
+        pass
+    os._exit(_DEADLINE_EXIT)
+
+
+def computer_can_finish(root):
+    """Whether this computer's own starter can finish a marked Launch: its service manager is one in
+    ``COMPUTER_FINISH_MANAGERS``, the guide is not on the managed Mac runtime, and the stable launcher
+    is the one ``setup_handoff_argv`` accepts. The Preview's ``finish`` and the guide's start both ask
+    this, and only this. Reads only; anything it cannot tell is False."""
+    try:
+        if platform.system() not in COMPUTER_FINISH_MANAGERS:
+            return False
+        from .. import installation as module
+        from ..plane.owner_setup import managed_setup
+        installation = managed_setup(Path(root)).installation
+        if module.managed_browser_runtime(installation) is not None:
+            return False
+        _host, body = module._entry_python(installation)
+        return body == Path(module.__file__).read_bytes()
+    except Exception:
+        return False
+
+
+def _finish_log(root, request_id):
+    """``state/setup-finish-<launch request id>.log``, beside the finish's lock; never under ``runtime/``."""
+    from ..plane.owner_setup import _uuid
+    if not _uuid(request_id):
+        raise AccessUnavailable("setup finish log is unavailable")
+    return _finish_path(root, request_id, "log")
+
+
+def finish_log_status(root, request_id):
+    """For ``setup-status`` only: the log's path and whether it exists. Nothing reads the log, and the
+    status run sent to a page never carries the path."""
+    try:
+        path = _finish_log(root, request_id)
+    except AccessUnavailable:
+        return None
+    return {"path": str(path), "exists": os.path.lexists(path)}
+
+
+def _open_finish_log(root, request_id):
+    """Create the log once, private, in a private ``state/``; refuse an existing file or a symlink."""
+    path = _finish_log(root, request_id)
+    state = path.parent
+    info = state.lstat()
+    if (state.resolve() != state.absolute() or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077):
+        raise AccessUnavailable("setup finish log directory is not private")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _start_waiter(paths, data):
+    """Start the terminal's setup waiter for this Launch, detached, once. True when started.
+
+    The waiter (``setup_handoff_argv``) watches the update record and, when the Launch is healthy and
+    DONE, runs ``host owner setup --_finish-setup`` with no terminal (``_unattended_finish``). Its own
+    session; working directory ``/``; umask 077; stdin ``/dev/null``; stdout and stderr the log; no
+    other descriptor, so it holds neither the page's SSH channel open nor a runtime reader lease
+    against the cutover. The guide's fixed profile environment, as it is. Any failure is False."""
+    fd = None
+    try:
+        from ..installation import setup_handoff_argv
+        from .host_owner import _GENERATED
+        environment = dict(os.environ)
+        if any(key in environment for key in (*_GENERATED, *_STARTER_REFUSED)):
+            return False
+        bound = {key: data[key] for key in ("state", "generation", "request_id", "config_fingerprint",
+                                            "source_revision")}
+        argv = setup_handoff_argv(paths.package.installation, bound)
+        fd = _open_finish_log(paths.root, data["request_id"])
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, cwd="/", env=environment,
+                         start_new_session=True, close_fds=True, umask=0o077)
+        return True
+    except Exception:
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def start_computer_finish(paths, store, data):
+    """After the guide's ``launch_handoff``: for a stored approval with the messages mark, start the
+    computer's own finish (``_start_waiter``) once, and record who will finish as ``payload["finish"]``.
+
+    The mark is read from the stored approval, never from a frame. The record is ``{"starter":
+    "computer"}``; ``{"starter": "page", "reason": "not_supported"}`` where ``computer_can_finish`` is
+    false; ``{"starter": "page", "reason": "waiter_unavailable"}`` when the start failed. It is a display
+    hint: nothing decides from it. Never raises and never waits; the Launch result is the caller's,
+    unchanged. Returns the record, or None for anything else (an unmarked approval starts and records
+    nothing).
+
+    Every exception stops here, ``KeyboardInterrupt`` too: ``interrupted`` turns SIGTERM and SIGHUP into
+    one, and a signal during the start or the record must not turn a good Launch into an error frame.
+    A start that did not complete records ``waiter_unavailable``, even if a waiter was already started:
+    the page then finishes as well, and the finish's lock and once-only record keep that to one finish."""
+    grant = value = None
+    try:
+        if not isinstance(data, dict) or data.get("state") != "launch_handoff":
+            return None
+        retained = OwnerSetup(store).retained_state()
+        grant = retained.grant
+        if (grant is None or grant.messages is None or retained.launch_id != data.get("request_id")
+                or grant.generation != data.get("generation")):
+            return None
+        value = {"starter": "page", "reason": "waiter_unavailable"}  # Until the start completes.
+        if not computer_can_finish(paths.root):
+            value = {"starter": "page", "reason": "not_supported"}
+        elif _start_waiter(paths, data):
+            value = {"starter": "computer"}
+    except BaseException:
+        if value is None:
+            return None
+    try:
+        _keep(store, grant, value, key="finish")
+    except BaseException:
+        pass  # The status then shows no ``finish``; the page reads that as its own finish.
+    return value
+
+
+def finish_running(root, request_id):
+    """Whether a process holds this Launch's finish lock now: a non-creating open and a shared,
+    non-blocking probe, released at once. A missing file, or one this open refuses, is not held: a
+    finish opens the same file the same way, so it cannot hold one this open refuses."""
+    import fcntl
+    from ..plane.owner_setup import _uuid
+    if not _uuid(request_id):
+        return False
+    try:
+        fd = os.open(_finish_path(root, request_id, "lock"),
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    return False
 
 
 def _card_messages(paths, store, grant, record, *, by, effects=None):
@@ -748,12 +1022,16 @@ def _card_messages(paths, store, grant, record, *, by, effects=None):
         return card_answer(store, grant, value)
 
 
-def _completed(args, paths, store, terminal, retained, record, package, *, consent=None):
+def _completed(args, paths, store, terminal, retained, record, package, *, consent=None, unattended=False):
+    """``unattended``: started with no terminal (``_unattended_finish``). Only a card-approved Launch may
+    finish so; anything else is refused here, before any output or write."""
     from ..plane.owner_setup import OwnerSetup
     from ..git_update import healthy_done
     from ..installation import _setup_binding
     from .host_owner import _setup_messages
     grant = retained.grant
+    if unattended and (consent is not None or terminal is not None or grant is None or grant.messages is None):
+        raise CommandFailure("conflict", "owner changes require an interactive operator terminal")
     actual = (grant.generation,record["request_id"], record["config_fingerprint"], record["target"])
     expected = getattr(args, "finish_setup", None)
     if (consent is not None and expected is None
@@ -764,9 +1042,12 @@ def _completed(args, paths, store, terminal, retained, record, package, *, conse
         raise CommandFailure("conflict", "the original setup is not current healthy DONE; inspect its original receipt")
     if grant.messages is not None:
         # The team card carried the messages mark: its finish, never the three optional cards.
-        messages = _card_messages(paths, store, grant, record, by="page" if consent is not None else "terminal")
+        by = "computer" if unattended else "page" if consent is not None else "terminal"
+        messages = _card_messages(paths, store, grant, record, by=by)
+        # Unattended, the line goes to the finish's log: never the name (nor, as ever, the goal).
+        shown = {key: value for key, value in messages.items() if key != "alias"} if unattended else messages
         return CommandOutput({"state": "setup_complete", "request_id": record["request_id"], "messages": messages},
-                             lines=(card_line(messages),))
+                             lines=(card_line(shown),))
     _say(terminal, "Your original team setup completed. Configuration and serving are not repeated. Provider/setup approval did not grant messages.\n")
     messages = _setup_messages(paths, store, terminal, grant.fleet,
         **({"consent": consent} if consent is not None else {}))
@@ -774,10 +1055,12 @@ def _completed(args, paths, store, terminal, retained, record, package, *, conse
         lines=("Original setup finished; no Launch or message was sent again.",))
 
 
-def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
+def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None, unattended=False):
     """``ssh`` is the captured server SSH source of an explicit SSH-controlled
     guide: no listener, no owner service, and typed operations on sibling
-    channels. It is never inferred from a frame or from the platform alone."""
+    channels. It is never inferred from a frame or from the platform alone.
+    ``unattended`` is ``--_finish-setup`` with no terminal: it reaches only
+    ``_completed`` or a refusal."""
     from . import host_owner as console
     from ..active_config import read_current_config
     from ..git_update import read_update
@@ -809,10 +1092,11 @@ def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
         if snapshot != record.get("candidate_config"):
             raise CommandFailure("conflict", "current configuration differs from the original setup")
         return _completed(args, paths, store, terminal, retained, record, package,
-                          **({"consent": consent} if consent is not None else {}))
+                          **({"consent": consent} if consent is not None else {}),
+                          **({"unattended": True} if unattended else {}))
     elif selected or retained and retained.launch_id is not None:
         raise CommandFailure("conflict", "guided setup cannot replace existing or unknown installation state")
-    if getattr(args, "finish_setup", None) is not None:
+    if getattr(args, "finish_setup", None) is not None or unattended:
         raise CommandFailure("conflict", "the original completed setup is unavailable; no replacement will be prepared")
     if not selected:
         fresh_owner_setup(paths.root, allow_absent=True)
@@ -869,8 +1153,11 @@ def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
     console._describe(terminal, owner)
     if not selected and store.connected().preparation_state() != "ready":
         console._initialize_connected(store, terminal, prepare_workspace=True, **typed)
-    with (_ssh_waiting() if ssh is not None else
-          _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed)) as child:
+    approved = None
+    recover = (_finish_after_disconnect(paths, store, lambda: approved)
+               if consent is not None and ssh is None else nullcontext())
+    with recover, (_ssh_waiting() if ssh is not None else
+                   _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed)) as child:
         if not selected:
             workspace_state, binding = store.workspace().status()
             if workspace_state == "absent":
@@ -913,13 +1200,8 @@ def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
                     consent.check_cancel()
                 if approved is not None:
                     retained = setup.retained_state()
-                    if retained.launch_id is not None:
-                        if retained.grant != approved:
-                            raise CommandFailure("conflict", "setup approval changed before handoff; inspect the original receipt")
-                        record = setup.operation(approved)
-                        if (record is None or record["request_id"] != retained.launch_id
-                                or record["config_fingerprint"] != retained.launch_plan):
-                            raise CommandFailure("conflict", "original setup operation changed before handoff")
+                    handoff = _launch_handoff(setup, approved, retained)
+                    if handoff is not None:
                         # Returning leaves _serving through its normal drain. Both
                         # the child and this guide must exit to release reader
                         # leases; never let imported owner code survive cutover.
@@ -928,9 +1210,7 @@ def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
                                      if ssh is not None else
                                      "The approved managed connection will return at the same address; keep the original browser view open."
                                      if approved.managed_owner else "After DONE, reconnect without another setup: " + shlex.join(service_command(paths.root, cli, config)))
-                        return CommandOutput({"state": "launch_handoff", "request_id": retained.launch_id,
-                            "config_fingerprint": retained.launch_plan, "generation": approved.generation,
-                            "source_revision": approved.source_revision, **carrier}, lines=(
+                        return CommandOutput({**handoff, **carrier}, lines=(
                                 "Original Launch retained. Local owner serving drained; this guide exits so the updater can proceed.",
                                 "Inspect the original operation: " + status,
                                 "If interrupted, continue that same operation locally; do not launch again.",
