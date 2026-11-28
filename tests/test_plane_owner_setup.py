@@ -2588,14 +2588,19 @@ def test_typed_completion_requires_original_tuple_before_any_message_consent(set
                   resolve_paths(root=engine.root), OwnerAccess(engine.root), None, consent=object())
 
 
-@pytest.mark.parametrize('retained_launch', [False, True])
-def test_typed_serving_interrupt_drains_without_success_replay_or_regrant(setup_authority, monkeypatch, retained_launch):
+@pytest.mark.parametrize("launch", ["none", "unmarked", "marked"])
+@pytest.mark.parametrize("interruption", ["disconnect", "keyboard", "drain"])
+def test_typed_serving_interrupt_drains_without_success_replay_or_regrant(
+    setup_authority, monkeypatch, launch, interruption,
+):
     from contextlib import contextmanager
-    import sys
+    import subprocess, sys
     from claudlobby.commands import host_owner_setup as guide
     from claudlobby.commands.owner_stdio import StdioRefused
     from claudlobby.context import resolve_paths
     store, access, grant, reader, *_ = setup_authority
+    if launch != "unmarked":
+        grant = replace(grant, messages={"alias": ALIAS})
     store.allow(grant)
     engine = SetupEngine(access)
     config = {'origin': 'https://host.example.test', 'socket': str(access.root / 'state/owner/owner.sock'),
@@ -2605,33 +2610,59 @@ def test_typed_serving_interrupt_drains_without_success_replay_or_regrant(setup_
         'account_directory', 'managed_owner', 'provider_signin')}, target_fleet=grant.fleet,
         install_directory=Path(grant.install_directory))
     monkeypatch.setattr(guide, '_configuration', lambda *_: (config, approval))
-    original, drained = {}, []
+    original, drained, started = {}, [], []
+    waited = False
+    monkeypatch.setattr(guide, "computer_can_finish", lambda _root: True)
+
+    def start_waiter(_paths, data):
+        assert drained == [True], "the guide starts Finish only after its server drains"
+        started.append(data)
+        return True
+
+    monkeypatch.setattr(guide, "_start_waiter", start_waiter)
     class Consent:
         def state(self, *_a, **_k): pass
-        def check_cancel(self): pass
+        def check_cancel(self):
+            if interruption == "disconnect" and waited:
+                raise StdioRefused("disconnected")
         def approve(self, *_a, **_k): pytest.fail('interrupt renewed consent')
     @contextmanager
     def serving(*_a, **_k):
         class Child:
             def wait(self, timeout):
-                if retained_launch:
+                nonlocal waited
+                assert not waited
+                waited = True
+                if launch != "none":
                     original.update(binding(engine.preview(reader, grant.generation, 'Review checkout')))
                     engine.launch(reader, **original)
-                raise KeyboardInterrupt
-        try: yield Child()
-        finally: drained.append(True)
+                if interruption == "keyboard":
+                    raise KeyboardInterrupt
+                if interruption == "drain" and not original:
+                    return 0
+                raise subprocess.TimeoutExpired("owner", timeout)
+        try:
+            yield Child()
+        finally:
+            drained.append(True)
+            if interruption == "drain":
+                raise StdioRefused("interrupted_unknown")
     monkeypatch.setattr(guide, '_serving', serving)
     profile = SimpleNamespace(prepare_directories=lambda *_: None, prepare_provider=lambda *_: None,
         origin=lambda: config['origin'], project=Path('/fixed/project'), account=Path('/fixed/profile'),
         units=Path(grant.install_directory), provider=Path('/fixed/provider'))
-    with pytest.raises(StdioRefused, match='interrupted_unknown'):
+    code = "disconnected" if interruption == "disconnect" else "interrupted_unknown"
+    with pytest.raises(StdioRefused, match=code):
         guide.run(SimpleNamespace(), resolve_paths(root=access.root), access, None, consent=Consent(), profile=profile)
     assert drained == [True]
     retained = store.retained_state()
     assert retained.grant == grant
-    assert len(setup_authority[-1].dispatches) == int(retained_launch)
-    if retained_launch:
+    assert len(setup_authority[-1].dispatches) == int(bool(original))
+    if original:
         assert retained.launch_id == original['request_id'] and retained.launch_plan == original['config_fingerprint']
+    assert started == ([{"state": "launch_handoff", **original}] if launch == "marked" else [])
+    if original:
+        assert preview_payload(access, grant).get("finish") == ({"starter": "computer"} if started else None)
 
 
 # --- Keyboard-mode switches are ignored: they never change the screen ---
@@ -3041,7 +3072,24 @@ def _receipt(caller, recipient, text, status="submitted"):
     from claudlobby.request_receipts import semantic_digest
     digest = semantic_digest({"body": MessageBody.from_input(text).text.encode("utf-8"), "kind": "chat"})
     return SimpleNamespace(operation="message.send", caller_uid=caller, recipient_uid=recipient, semantic_sha256=digest,
-                           transmissions=(SimpleNamespace(transport=SimpleNamespace(status=status)),))
+                           transmissions=(SimpleNamespace(transport=SimpleNamespace(status=status)),),
+                           provenance={"carrier": "setup_finish"})
+
+
+@pytest.mark.parametrize("by,provenance,expected", [
+    ("computer", None, {"state": "unknown", "reason": "request_id_taken"}),
+    ("computer", {"carrier": "connected"}, {"state": "unknown", "reason": "request_id_taken"}),
+    ("computer", {"carrier": "setup_finish"}, {"state": "sent"}),
+    ("page", None, {"state": "sent"}),
+])
+def test_computer_goal_requires_setup_finish_receipt_provenance(by, provenance, expected):
+    from claudlobby.commands.host_owner_setup import _sent
+
+    text = "Review this checkout"
+    view = _receipt(ACTOR_UID, LEAD_UID, text)
+    view.provenance = provenance
+    value = {"by": by, "actor_uid": ACTOR_UID, "lead_uid": LEAD_UID}
+    assert _sent(view, value, text) == expected
 
 
 class FakeCard:
@@ -3163,6 +3211,32 @@ def test_a_held_finish_lock_answers_in_progress_and_writes_nothing(setup_authori
         os.close(fd)
     assert finish(setup_authority, request, card, monkeypatch)["messages"]["state"] == "allowed"
     assert len(card.sent) == 1
+
+
+def test_finish_can_claim_lock_after_transient_status_probe(tmp_path, monkeypatch):
+    import fcntl
+    import os
+
+    from claudlobby.commands import host_owner_setup as guide
+
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    request_id = str(uuid4())
+    probe = os.open(state / f"setup-finish-{request_id}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        waits = []
+
+        def end_probe(delay):
+            waits.append(delay)
+            fcntl.flock(probe, fcntl.LOCK_UN)
+
+        monkeypatch.setattr(guide.time, "sleep", end_probe)
+        with guide._finish_lock(tmp_path, request_id) as held:
+            assert held
+        assert len(waits) == 1 and 0 < waits[0] <= 0.02
+    finally:
+        os.close(probe)
 
 
 def test_a_finish_that_died_after_choosing_its_label_resumes_with_it(setup_authority, monkeypatch):
@@ -4572,7 +4646,14 @@ def test_preview_finish_matches_start_predicate(setup_authority, monkeypatch, co
     else:
         monkeypatch.setattr(module, "managed_browser_runtime", lambda _installation: None)
     holds = computer == "linux"
-    assert computer_can_finish(access.root) is holds
+    if computer == "mac":
+        from claudlobby.plane import owner_setup
+
+        with monkeypatch.context() as patch:
+            patch.setattr(owner_setup, "managed_setup", lambda *_: pytest.fail("unsupported platform inspected Git"))
+            assert computer_can_finish(access.root) is False
+    else:
+        assert computer_can_finish(access.root) is holds
     grant = replace(grant, messages={"alias": ALIAS})
     store.allow(grant)
     engine = SetupEngine(access)
@@ -4706,22 +4787,53 @@ def test_a_hanging_unattended_finish_is_cut_off_and_the_page_sends_once(setup_au
             pytest.fail("the unattended finish was not cut off")
         time.sleep(0.05)
     assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == guide._DEADLINE_EXIT
-    read = lambda: card_status(access, OwnerSetup(access).retained_state())
-    assert read()["messages"]["state"] == "allowed" and read()["messages"]["goal"] == {"state": "pending"}
-    assert read()["finish"] == {"starter": "computer", "running": False}, "stale: no process holds the lock"
+    from claudlobby import request_queries
+
     pressed = FakeCard(access)
+    goal_id = goal_request_id(record["request_id"])
     if cut != "before_the_request":
-        assert sent.read_text() == goal_request_id(record["request_id"])
+        assert sent.read_text() == goal_id
         # What the cut-off send left: the committed request under the derived id.
-        pressed.receipts[sent.read_text()] = _receipt(ACTOR_UID, LEAD_UID, preview_payload(access, grant)["goal"])
+        pressed.receipts[goal_id] = _receipt(ACTOR_UID, LEAD_UID, preview_payload(access, grant)["goal"])
+    if cut == "while_the_transport_runs":
+        pressed.receipts[goal_id].transmissions = (SimpleNamespace(transport=None),)
+
+    def lookup(root, fleet_uid, request_id):
+        assert (root, fleet_uid, request_id) == (access.root, FLEET_UID, goal_id)
+        view = pressed.receipts.get(request_id)
+        if view is None:
+            raise request_queries.RequestNotFoundError()
+        return view
+
+    monkeypatch.setattr(request_queries, "read_request", lookup)
+    read = lambda: card_status(access, OwnerSetup(access).retained_state())
+    before = preview_payload(access, grant)
+    assert before["messages"]["goal"] == {"request_id": goal_id, "state": "pending"}
+    state = read()
+    expected = {
+        "before_the_request": {"state": "pending"},
+        "while_the_transport_runs": {"state": "unknown", "reason": "send_uncertain"},
+        "after_the_send": {"state": "sent"},
+    }[cut]
+    assert state["messages"]["state"] == "allowed" and state["messages"]["goal"] == expected
+    assert state["finish"] == ({"starter": "computer", "running": False} if cut == "before_the_request"
+                               else {"starter": "computer"})
+    assert preview_payload(access, grant) == before, "status leaves the original receipt untouched"
+    if cut == "before_the_request":
+        def unavailable(*_args):
+            raise request_queries.RequestUnavailableError()
+        with monkeypatch.context() as patch:
+            patch.setattr(request_queries, "read_request", unavailable)
+            state = read()
+            assert state["messages"]["goal"] == {"state": "unknown", "reason": "receipt_unavailable"}
+            assert state["finish"] == {"starter": "computer"}
+            assert preview_payload(access, grant) == before
     if cut == "while_the_transport_runs":
         # The transport child outlives the finish and may complete the paste after the exit.
         limit = time.monotonic() + 15
         while not landed.exists() and time.monotonic() < limit:
             time.sleep(0.05)
         assert landed.read_text() == "pasted"
-        # Its transport outcome was never recorded: reserved, the effect may have happened.
-        pressed.receipts[sent.read_text()].transmissions = (SimpleNamespace(transport=None),)
     answer = finish(setup_authority, request, pressed, monkeypatch)["messages"]
     assert answer["state"] == "allowed" and answer["by"] == "computer"
     assert answer["goal"] == ({"state": "unknown", "reason": "send_uncertain"} if cut == "while_the_transport_runs"

@@ -780,8 +780,9 @@ re-checks the approval, binding and owner and writes the message grant in one
 transaction; then, after the same checks plus the grant row, the goal against
 the launched configuration, and the computer's update record re-read at send
 time (still this Launch's, healthy, at the running revision), sends the Preview's goal to the lead once under a
-request id derived from the Launch's. It counts the goal sent only from a
-receipt whose sender, recipient and body match. One finish runs at a time
+request id derived from the Launch's. It reports `sent` when a matching receipt
+shows sender submission. An unattended receipt must carry `setup_finish`
+provenance. Receiver evidence is separate. One finish runs at a time
 (`state/setup-finish-<launch request id>.lock`); its record lives in the
 approval's Preview row, so running it again answers from that record and never
 grants or sends twice. Its answer is `{"state": "setup_complete", "request_id":
@@ -793,9 +794,10 @@ terminal (`_unattended_finish`). It reports `allowed` only while the grant row
 holds; otherwise `revoked` with reason `messages_revoked`. The status run and
 `host owner setup-status` carry the same answer and the goal text under `setup`.
 
-Who starts the finish. When the guide's run returns `launch_handoff` for a
-stored approval carrying the mark (read from the store, never from a frame), and
-`computer_can_finish` holds, the guide starts the terminal's setup waiter
+Who starts the finish. When the foreground guide drains after the original
+Launch is retained, it can start Finish even if the browser disconnected before
+the next poll. It checks the same stored marked approval and exact Launch
+record. Where `computer_can_finish` holds, the guide starts the terminal's setup waiter
 (`setup_handoff_argv`) once, as a detached child: its own session, working
 directory `/`, umask 077, stdin `/dev/null`, stdout and stderr written to
 `state/setup-finish-<launch request id>.log` (created once, mode 0600, no
@@ -804,15 +806,16 @@ environment. The guide never waits for it. When the Launch is healthy and DONE,
 the waiter runs the finish once with no terminal, through the same operator gate;
 an approval without the mark is refused there before any output or write. In that
 mode the finish's line in the log carries neither the name nor the goal. One
-attempt: a waiter that is not started, is stopped, or times out sends nothing,
-and the page finishes. The finish it runs ends by itself
-`UNATTENDED_FINISH_DEADLINE_S` (240 s) after it starts, twice the longest wait
-of the goal's send (about 110 s), wherever it is blocked: the process exits at
-once, sends nothing further and the kernel releases its lock, so the record
-reads stale and the page's finish carries it on. That cannot send the goal
-twice: a strict owner send commits the request under the derived id before any
-native effect, and the next finish reads that id first and never sends when a
-request exists. The page's finish and a terminal's have no deadline.
+attempt. The page can offer Finish again after it verifies the original
+healthy Launch. The unattended Finish's parent process exits
+`UNATTENDED_FINISH_DEADLINE_S` (240 s) after it starts, about twice the expected
+send budget. The kernel releases its lock. A native transport child already
+running in its own session may still complete the original paste. A strict
+owner send commits the derived request before any native effect. Status
+checks that request when a stopped Finish left a pending goal and shows an
+uncertain outcome if a send was reserved but lacks confirmation. A later
+Finish reads the same request and never sends again when it exists. The
+page's Finish and a terminal's have no deadline.
 The `launch_handoff` result keeps exactly its five keys.
 Before emitting it, the guide records who will finish in the approval's Preview
 row, and the status run reports it as `setup.finish`: `{"starter": "computer"}`;
