@@ -138,7 +138,9 @@ def register_task_write_subparsers(task_children, assignment_children):
     delivering = _route(assignment_children, "deliver", "assignment.deliver",
                         "Deliver a recorded assignment to its current worker")
     delivering.add_argument("assignment_id", metavar="ASSIGNMENT_ID")
-    delivering.add_argument("--file", required=True, metavar="FILE")
+    content = delivering.add_mutually_exclusive_group(required=True)
+    content.add_argument("--text", metavar="TEXT", help="Assignment instructions as one argument")
+    content.add_argument("--file", metavar="FILE", help="Read assignment instructions from a UTF-8 file")
     delivering.add_argument("--retry-uncertain", action="store_true")
 
     rescheduling = _route(assignment_children, "reschedule", "assignment.reschedule",

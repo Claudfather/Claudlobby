@@ -18,8 +18,8 @@ unavailable evidence does not mean idle.
    that task's `data.workstream_id`, before that task closes.
 2. Assign it with `claudlobby --json task assign TASK_ID --bot BOT --request-id UUID`.
    Retain `data.assignment_id`. This records ownership without sending a prompt.
-3. Write the bounded worker instructions to a UTF-8 file, then run
-   `claudlobby --json assignment deliver ASSIGNMENT_ID --file FILE --request-id UUID`.
+3. Run `claudlobby --json assignment deliver ASSIGNMENT_ID --text 'Instructions for this assignment' --request-id UUID`.
+   For instructions already in a UTF-8 file, use `--file FILE` in place of `--text`.
 4. Inspect the result and its message receipt before claiming delivery. The
    assigned bot accepts the canonical assignment before acting and records its
    linked progress or terminal report through the assignment commands.

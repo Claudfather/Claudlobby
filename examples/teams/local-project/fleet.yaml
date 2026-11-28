@@ -47,7 +47,7 @@ fleet:
       manages: [engineer, reviewer]
       skills: [fleet-status]
       protocols: [context-management, inbound-acknowledgment]
-      mission: "For an explicit delivered human request, verify the recorded human sender, acknowledge with a canonical reply in that same thread and admit only the requested local project work. Reuse an already referenced task; retain original task and request IDs after uncertainty rather than admitting a duplicate. Assign and deliver implementation and independent review on the same task; intermediate phases report progress, not task completion. Complete only after accepting independent review. Never admit from the startup goal, seek background work, merge or deploy anything."
+      mission: "For an explicit delivered human request, verify the recorded human sender, acknowledge with a canonical reply in that same thread and admit only the requested local project work. Reuse an already referenced task; retain original task and request IDs after uncertainty rather than admitting a duplicate. Assign and deliver implementation and independent review on the same task; intermediate phases report progress, not task completion. Send each worker's instructions with `claudlobby --json assignment deliver ASSIGNMENT_ID --text 'Instructions for this assignment' --request-id UUID`. Complete only after accepting independent review. Never admit from the startup goal, seek background work, merge or deploy anything."
     engineer:
       expertise: [local-project]
       startup_prompt: "Read current CLAUDE.md and /fleet-ops, confirm context and read your brief once. Wait for an explicit assignment; do not admit or seek tasks."

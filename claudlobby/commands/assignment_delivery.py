@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sqlite3
-from types import SimpleNamespace
 
 from ..command_result import CommandFailure, CommandOutput
 
@@ -55,7 +54,7 @@ def dispatch(args) -> CommandOutput:
         request_id = canonical_request_id(args.request_id)
         if not isinstance(args.assignment_id, str) or not args.assignment_id.strip() or "\0" in args.assignment_id:
             raise CommandFailure("invalid_argument", "ASSIGNMENT_ID requires a task assignment reference")
-        body = _body(SimpleNamespace(text=None, file=args.file))
+        body = _body(args)
         selected, origin = resolve_operation_scope(root=args.root, fleet=args.fleet)
         if selected.paths.seed or origin is None or origin.bot_id != selected.fleet.manager:
             raise CommandFailure("conflict", "assignment delivery requires a generated fleet manager")
