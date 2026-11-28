@@ -121,8 +121,10 @@ moved task included, so moving the task back cannot undo a mistaken move.
 ```bash
 claudlobby --json task assign TASK_ID --bot WORKER --request-id ASSIGN_UUID
 claudlobby --json assignment show ASSIGNMENT_ID
-claudlobby --json assignment deliver ASSIGNMENT_ID --file FILE --request-id DELIVER_UUID
+claudlobby --json assignment deliver ASSIGNMENT_ID --text 'Instructions for this assignment' --request-id DELIVER_UUID
 ```
+
+Use `--file FILE` in place of `--text` to send instructions already in a UTF-8 file.
 
 ```bash
 claudlobby --json assignment accept ASSIGNMENT_ID --request-id ACCEPT_UUID

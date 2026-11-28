@@ -143,16 +143,18 @@ delivery, and delivery is not worker acceptance. Retain a distinct request UUID
 for each operation and inspect recording and notification separately.
 
 ```bash
-# Manager: admit, assign, then deliver the exact assignment from a UTF-8 file.
+# Manager: admit, assign, then deliver the exact assignment.
 claudlobby --json task admit --title "Implement X" --request-id ADMIT_UUID
 claudlobby --json task assign TASK_ID --bot WORKER --request-id ASSIGN_UUID
-claudlobby --json assignment deliver ASSIGNMENT_ID --file INSTRUCTIONS_FILE --request-id DELIVER_UUID
+claudlobby --json assignment deliver ASSIGNMENT_ID --text 'Implement the rate limit' --request-id DELIVER_UUID
 
 # Worker: accept, then report against that current assignment.
 claudlobby --json assignment accept ASSIGNMENT_ID --request-id ACCEPT_UUID
 claudlobby --json assignment progress ASSIGNMENT_ID --summary "Refactoring auth" --percent 40 --request-id PROGRESS_UUID
 claudlobby --json assignment complete ASSIGNMENT_ID --summary "Rate limit landed" --pr https://github.com/org/api/pull/87 --pr-role authored --request-id COMPLETE_UUID
 ```
+
+Use `--file INSTRUCTIONS_FILE` for instructions already in a UTF-8 file.
 
 A blocker that leaves the worker owning the assignment uses `assignment
 block --reason`; a worker yielding it uses `assignment return --reason`.

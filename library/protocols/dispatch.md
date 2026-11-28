@@ -17,8 +17,9 @@ protocol's own. This protocol adds only what a manager checks around them.
 
 ## Manager task flow
 
-Choose a concrete outcome and prepare an existing UTF-8 delivery file with the
-worker's instructions and relevant plan, repo, deadline, and project context.
+Choose a concrete outcome and prepare the worker's instructions with the relevant
+plan, repo, deadline, and project context. Deliver them with `--text` or from an
+existing UTF-8 file with `--file`.
 Admit with the task's repo and project; the guide shows the assign and deliver
 steps that follow:
 

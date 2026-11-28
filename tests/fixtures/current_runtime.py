@@ -37,7 +37,7 @@ def tmp_path(tmp_path_factory):
 
 
 @pytest.fixture
-def current_runtime(tmp_path, monkeypatch):
+def current_runtime(tmp_path, monkeypatch, request):
     installation = _source_installation(tmp_path)
     root = installation.data_root
     repo = Path(__file__).resolve().parents[2]
@@ -58,9 +58,11 @@ def current_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(context, "get_resources", lambda: package)
     monkeypatch.setattr(admission.RuntimeIdentity, "current", classmethod(lambda cls:
         cls(installation.cli, installation.native, "", installation, revision)))
+    bots = {"worker": "testing", "manager": "orchestration", **getattr(request, "param", {})}
+    roster = "".join(f"    {bot}: {{expertise: [{expertise}]}}\n" for bot, expertise in bots.items())
     manifest = root / "fleet.yaml"
     manifest.write_text("fleet:\n  name: example\n  manager: manager\n  service_prefix: com.example\n"
-                        "  bots:\n    worker: {expertise: [testing]}\n    manager: {expertise: [orchestration]}\n")
+                        "  bots:\n" + roster)
     builder = ConfigPlanBuilder(root, fleets=("example",),
         effects={"fleet_manifests": {"example": str(manifest)}, "units": []})
     projects = root / "projects.yaml"
@@ -73,7 +75,7 @@ def current_runtime(tmp_path, monkeypatch):
            "CLAUDLOBBY_NATIVE_DIR": str(installation.native),
            "CLAUDLOBBY_LIBRARY_DIR": str(installation.source / "library")}
     tmux_dir = tmp_path / "tmux"
-    for bot in ("worker", "manager"):
+    for bot in bots:
         working = root / "runtime/bots" / bot
         stem = "com.example." + bot
         unit_env = {**env, "FLEET_NAME": "example", "BOT_ID": bot,
@@ -114,7 +116,7 @@ def current_runtime(tmp_path, monkeypatch):
             conn.execute("UPDATE registry_snapshots SET host_uid=? WHERE ingest_seq="
                          "(SELECT MAX(ingest_seq) FROM registry_snapshots)", (host_uid,))
         snapshot("fleet", "example", fleet_uid)
-        for bot in ("manager", "worker"):
+        for bot in sorted(bots):
             alias = "bot:example/" + bot
             identity("actor", alias, fleet_uid)
             snapshot("bot", alias, identity("bot_instance", alias, fleet_uid))

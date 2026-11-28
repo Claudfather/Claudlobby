@@ -287,8 +287,12 @@ To admit work into your own fleet, retain one canonical UUID for the operation: 
 Every task belongs to a workstream: admit opens the task's own, or `--workstream ID` joins an open one.
 
 Only the fleet manager routes, delivers, or changes its fleet's assignments.
-Assign first; then deliver the exact assignment using an existing UTF-8
-message file you supply and retain through an uncertain outcome: §Task lifecycle.
+Assign first. Deliver the exact assignment with `--text` or pass an existing
+UTF-8 instructions file with `--file` (see §Task lifecycle). Keep the exact
+instructions and request UUID for reconciliation, including any final newline.
+Quote direct text as one shell argument. A literal apostrophe can be written
+by closing the single quotes, writing `\'`, and reopening them, as in
+`--text='Don'\''t skip review'`.
 
 If delivery is unknown, the message may already have been sent. Inspect the
 same request and receipt; do not automatically resend or mint another request.
@@ -345,13 +349,15 @@ reassigns the same task to itself, accepts that final assignment, and records
 `assignment complete`. Only complete once the reviewed outcome is verified.
 
 For each handoff, the manager runs `task reassign TASK_ID --bot BOT --reason
-TEXT --request-id UUID`, retains the returned successor assignment ID, and
-uses `assignment deliver` for that exact assignment before the worker accepts
-it. Reassignment preserves the task and workstream; it does not itself deliver
-instructions. The manager's own final assignment needs no delivery to another
-bot. If review requests changes, reassign the still-open task to the engineer
-instead of admitting a duplicate. A completed task cannot be reassigned; when
-all tasks in a workstream have ended, it refuses new tasks joining it.
+TEXT --request-id UUID` and retains the returned successor assignment ID. Send
+instructions for that exact assignment with `claudlobby --json assignment deliver
+ASSIGNMENT_ID --text 'Instructions for this assignment' --request-id UUID` before
+the worker accepts it. Reassignment preserves the task and workstream; it does
+not itself deliver instructions. The manager's own final assignment needs no
+delivery to another bot. If review requests changes, reassign the still-open
+task to the engineer instead of admitting a duplicate. A completed task cannot
+be reassigned; when all tasks in a workstream have ended, it refuses new tasks
+joining it.
 
 `complete`, `fail` and `return` leave your open assignments. `block` keeps it and changes nothing in the table. Only your
 manager or an operator moves a deadline (`assignment reschedule`, above). If you

@@ -530,6 +530,135 @@ def test_assignment_deliver_refuses_stale_before_native(active, monkeypatch, cap
     assert _facts(root) == (0, 0)
 
 
+@pytest.mark.parametrize("cold", [{"reviewer": "testing"}], indirect=True)
+def test_assignment_deliver_text_preserves_distinct_worker_and_reviewer_handoffs(
+    active, monkeypatch, capsys, tmp_path,  # noqa: F811
+):
+    from hashlib import sha256
+
+    from claudlobby.commands import assignment_delivery as deliver_command
+    from claudlobby.plane.emit_api import emit_batch
+    from claudlobby.report_payload import ReportPayload
+
+    root, host = active
+    _generated(monkeypatch, root, host.installation)
+    ctx, task, implementation = _assigned(root)
+    submitted = []
+    real = assignment_delivery.deliver
+
+    def injected(*args, **kwargs):
+        def transport(_, destination, *, message_id, body):
+            wire = body.encode("utf-8")
+            digest = "sha256:" + sha256(wire).hexdigest()
+            submitted.append((destination.session, message_id, body, len(wire), digest))
+            return TransportOutcome("submitted", digest, len(wire), 0)
+
+        return real(*args, transport=transport, **kwargs)
+
+    monkeypatch.setattr(assignment_delivery, "deliver", injected)
+    monkeypatch.setattr(deliver_command, "_RECEIPT_WAIT_S", 0)
+    monkeypatch.setattr(message_operations, "read_recipient_box", lambda *_: None)
+    monkeypatch.setattr(message_operations, "repair_held_delivery", lambda *_, first, **__: (None, first))
+
+    def confirm(destination):
+        session, msg_id, _, size, digest = submitted[-1]
+        assert session == destination
+        emit_batch(root, [{"event_type": "transmission", "emitter": "dispatch-in-hook", "fleet": "example",
+                           "payload": {"msg_id": msg_id, "attempt_no": 1, "carrier": "tmux",
+                                       "destination": destination, "state": "received",
+                                       "received_bytes": size, "received_sha256": digest}}],
+                   require_commit=True)
+
+    implement = "Prépare le formulaire d'inscription.\n署名の手順も確認してください。"
+    original_request = str(uuid4())
+    original = (implementation.assignment_id, "--text", implement, "--request-id", original_request)
+    assert main(["--json", "assignment", "deliver", *original]) == 5
+    first = json.loads(capsys.readouterr().out)
+    assert first["command"] == "assignment.deliver" and not first["ok"]
+    assert first["error"]["code"] == "delivery_unknown"
+    assert first["data"]["task_id"] == task.task_id
+    assert first["data"]["recording"] == "committed" and first["data"]["request_persisted"]
+    assert first["data"]["destination"]["uid"] == ctx.bots["worker"].uid
+    assert "Prépare" not in json.dumps(first, ensure_ascii=False)
+    request_record, = (root / "state/requests").glob(f"*/{original_request}.json")
+    assert "Prépare" not in request_record.read_text()
+
+    same = tmp_path / "same-instructions.txt"
+    same.write_bytes(implement.encode("utf-8"))
+    replay = _delivery_call(capsys, root, implementation.assignment_id, "--file", str(same),
+                            "--request-id", original_request, expected=5)
+    assert replay["data"]["replayed"] and replay["data"]["message_id"] == first["data"]["message_id"]
+    changed = _delivery_call(capsys, root, implementation.assignment_id, "--text", "Changed instructions",
+                             "--request-id", original_request, expected=4)
+    assert changed["error"]["code"] == "conflict"
+    assert len(submitted) == 1 and _facts(root) == (1, 1)
+
+    confirm("worker")
+    delivered = _delivery_call(capsys, root, *original, expected=0)["data"]
+    assert delivered["replayed"] and delivered["delivery"] == "received"
+    assert delivered["integrity_verdict"] == "delivered"
+    assert len(submitted) == 1
+
+    _generated(monkeypatch, root, host.installation, bot="worker")
+    assert main(["--root", str(root), "--json", "assignment", "accept", implementation.assignment_id,
+                 "--request-id", str(uuid4())]) == 0
+    capsys.readouterr()
+    selected, origin = operation_context.resolve_operation_scope(root=root)
+    worker_ctx = operation_context.bind_task_context(selected, origin=origin)
+    task_operations.progress(worker_ctx, str(uuid4()), implementation.assignment_id,
+                             ReportPayload("progress", summary="Implementation ready for review"))
+
+    _generated(monkeypatch, root, host.installation)
+    assert main(["--root", str(root), "--json", "task", "reassign", task.task_id, "--bot", "reviewer",
+                 "--reason", "Independent review", "--request-id", str(uuid4())]) == 0
+    review_id = json.loads(capsys.readouterr().out)["data"]["assignment_id"]
+    assert review_id != implementation.assignment_id
+    review = "Review the implementation and report your verdict."
+    review_request = (review_id, "--text", review, "--request-id", str(uuid4()))
+    _generated(monkeypatch, root, host.installation, bot="reviewer")
+    refused = _delivery_call(capsys, root, *review_request, expected=4)
+    assert refused["error"]["code"] == "conflict" and len(submitted) == 1
+
+    _generated(monkeypatch, root, host.installation)
+    second = _delivery_call(capsys, root, *review_request, expected=5)["data"]
+    assert second["destination"]["uid"] == ctx.bots["reviewer"].uid
+    confirm("reviewer")
+    assert _delivery_call(capsys, root, *review_request, expected=0)["data"]["delivery"] == "received"
+
+    assert [(msg_id, envelope.split("\n\n", 1)[1]) for _, msg_id, envelope, _, _ in submitted] == [
+        (first["data"]["message_id"], implement), (second["message_id"], review),
+    ]
+    with sqlite3.connect(db_file(root)) as conn:
+        assert conn.execute("SELECT work_item_id, assignment_id, sender_uid, recipient_uid, body "
+                            "FROM communications WHERE message_class='task_request' ORDER BY ingest_seq").fetchall() == [
+            (task.task_id, implementation.assignment_id, ctx.caller.uid, ctx.bots["worker"].uid, implement),
+            (task.task_id, review_id, ctx.caller.uid, ctx.bots["reviewer"].uid, review),
+        ]
+
+
+@pytest.mark.parametrize("body", [[], ["--text", "Private text", "--file", "private.txt"]])
+def test_assignment_deliver_requires_exactly_one_body(body, capsys):
+    with pytest.raises(SystemExit) as exited:
+        main(["--json", "assignment", "deliver", "assignment", "--request-id", str(uuid4()), *body])
+    output = json.loads(capsys.readouterr().out)
+    assert exited.value.code == 2 and output["command"] == "assignment.deliver"
+    assert "Private text" not in json.dumps(output) and "private.txt" not in json.dumps(output)
+
+
+def test_assignment_deliver_text_checks_byte_cap_before_recording(active, monkeypatch, capsys):
+    from claudlobby.plane.registries import cap_for
+
+    root, host = active
+    _generated(monkeypatch, root, host.installation)
+    _, _, assigned = _assigned(root)
+    request_id = str(uuid4())
+    body = "a" * (cap_for("communication", "body") - 1) + "é"
+    refused = _delivery_call(capsys, root, assigned.assignment_id, "--text", body,
+                             "--request-id", request_id, expected=2)
+    assert refused["error"]["code"] == "invalid_argument"
+    assert _facts(root) == (0, 0) and not list((root / "state/requests").glob(f"*/{request_id}.json"))
+
+
 def _show_call(capsys, root, assignment_id):
     assert main(["--root", str(root), "--json", "assignment", "show", assignment_id]) == 0
     output = json.loads(capsys.readouterr().out)

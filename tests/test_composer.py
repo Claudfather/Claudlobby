@@ -6345,6 +6345,7 @@ def test_local_project_effective_composition_has_no_remote_or_blanket_grants(tmp
     assert "only the lead completes it after accepting independent review" in prose
     if bot_id == "lead":
         assert "explicit delivered human request" in bot.mission
+        assert "Use `assignment deliver --text` for both handoffs" in prose
         assert "The ack precedes the substance" in instructions
         # The approved folder is the project the lead admits work against (41-05).
         assert f"| project | {project} |  | review |" in instructions
