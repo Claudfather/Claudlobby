@@ -558,6 +558,7 @@ def test_assignment_deliver_text_preserves_distinct_worker_and_reviewer_handoffs
     monkeypatch.setattr(assignment_delivery, "deliver", injected)
     monkeypatch.setattr(deliver_command, "_RECEIPT_WAIT_S", 0)
     monkeypatch.setattr(message_operations, "read_recipient_box", lambda *_: None)
+    monkeypatch.setattr(message_operations, "repair_held_delivery", lambda *_, first, **__: (None, first))
 
     def confirm(destination):
         session, msg_id, _, size, digest = submitted[-1]
@@ -568,7 +569,7 @@ def test_assignment_deliver_text_preserves_distinct_worker_and_reviewer_handoffs
                                        "received_bytes": size, "received_sha256": digest}}],
                    require_commit=True)
 
-    implement = "Prépare le formulaire.\n署名の手順も確認してください。"
+    implement = "Prépare le formulaire d'inscription.\n署名の手順も確認してください。"
     original_request = str(uuid4())
     original = (implementation.assignment_id, "--text", implement, "--request-id", original_request)
     assert main(["--json", "assignment", "deliver", *original]) == 5

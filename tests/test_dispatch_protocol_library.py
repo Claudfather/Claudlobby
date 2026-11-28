@@ -29,8 +29,9 @@ KEPT = (
     "For `task withdraw` and `task reassign` it names their `--help`.",
     "The readiness gate on a `bot start` result, below, is this protocol's own.",
     "This protocol adds only what a manager checks around them.",
-    # 5: the delivery file
-    "Choose a concrete outcome and prepare an existing UTF-8 delivery file with the worker's instructions and relevant plan, repo, deadline, and project context.",
+    # 5: the delivery instructions
+    "Choose a concrete outcome and prepare the worker's instructions with the relevant plan, repo, deadline, and project context.",
+    "Deliver them with `--text` or from an existing UTF-8 file with `--file`.",
     # 8: admit with the task's repo and project; the command's example title and repo
     # are left out, so it is pinned as the three parts around them
     "Admit with the task's repo and project; the guide shows the assign and deliver steps that follow:",

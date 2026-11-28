@@ -287,8 +287,12 @@ To admit work into your own fleet, retain one canonical UUID for the operation: 
 Every task belongs to a workstream: admit opens the task's own, or `--workstream ID` joins an open one.
 
 Only the fleet manager routes, delivers, or changes its fleet's assignments.
-Assign first; then deliver the exact assignment using an existing UTF-8
-message file you supply and retain through an uncertain outcome: §Task lifecycle.
+Assign first. Deliver the exact assignment with `--text` or pass an existing
+UTF-8 instructions file with `--file` (see §Task lifecycle). Keep the exact
+instructions and request UUID for reconciliation, including any final newline.
+Quote direct text as one shell argument. A literal apostrophe can be written
+by closing the single quotes, writing `\'`, and reopening them, as in
+`--text='Don'\''t skip review'`.
 
 If delivery is unknown, the message may already have been sent. Inspect the
 same request and receipt; do not automatically resend or mint another request.
