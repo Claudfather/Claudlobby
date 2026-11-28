@@ -760,17 +760,31 @@ sleep 30
 def test_managed_version_cleanup_requires_confirmation_the_group_is_gone(tmp_path, signal_name, platform, checks, measured):
     probe = _managed_probe()
     binary = _stub(tmp_path, "healthy", healthy("2.1.318"))
-    # The provider exits normally. Simulate the kernel response to one cleanup signal.
+    # The provider exits normally. Use wall time until the first simulated
+    # refusal, then advance the probe clock by its requested sleeps.
     scenario = """
-import errno, itertools, os, selectors, signal, subprocess, sys
+import errno, itertools, os, selectors, signal, subprocess, sys, time
+from types import SimpleNamespace
 # Load the native process and selector modules before overriding the platform flag.
 probe, signal_name, platform, sequence = sys.argv[1:5]
 sys.argv = ["-c", *sys.argv[5:]]
 sys.platform = platform
 outcomes = sequence.split(",")
 answers = itertools.chain(outcomes, itertools.repeat(outcomes[-1]))
+cleanup_time = None
+def probe_monotonic():
+    return time.monotonic() if cleanup_time is None else cleanup_time
+def probe_sleep(seconds):
+    global cleanup_time
+    if cleanup_time is None:
+        time.sleep(seconds)
+    else:
+        cleanup_time += seconds
+clock = SimpleNamespace(monotonic=probe_monotonic, sleep=probe_sleep)
 def fake_killpg(pid, sig):
+    global cleanup_time
     if sig == getattr(signal, signal_name):
+        cleanup_time = time.monotonic()
         raise PermissionError(errno.EPERM, "original group error")
     if sig == signal.SIGTERM:
         return  # Reach the SIGKILL case after a successful SIGTERM.
@@ -787,7 +801,9 @@ def fake_killpg(pid, sig):
         return
     raise AssertionError(f"unexpected signal {sig}")
 os.killpg = fake_killpg
-exec(probe)
+# Isolate the probe globals so the fixture retains its real time module.
+sys.modules["time"] = clock
+exec(probe, {})
 """
     result = _run(tmp_path, [sys.executable, "-I", "-S", "-c", scenario,
                              probe, signal_name, platform, checks, "2", str(binary)], _timeout=5)
