@@ -51,7 +51,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
   fetch = globalThis.fetch.bind(globalThis), createClient = createConnectedReadClient,
   createTransport = createWorkspaceReadTransport, createEnrollment = createWorkspaceEnrollment, setTimeout = globalThis.setTimeout,
   clearTimeout = globalThis.clearTimeout, onRetire = () => {}, now = () => Date.now() / 1000,
-  monotonicNow = () => globalThis.performance.now(), MutationObserver = globalThis.MutationObserver } = {}) {
+  monotonicNow = () => globalThis.performance.now(), MutationObserver = globalThis.MutationObserver,
+  connectOnHandoff = true } = {}) { // connectOnHandoff: tests only; the page never passes it
   const browserTransport = fetch.browserOwnerTransport === true; // Presentation only; core remains the grant authority.
   // part_names is optional: the embedding page's names for the parts view. A malformed value is dropped whole
   // (partNames), never the document.
@@ -116,8 +117,8 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     if (continuity?.ended) return continuity.changed ? 'Your account or saved computers changed. Reopen setup from your workspace.'
       : status.remediation || '';
     if (expired) return 'Your connection to this computer expired. Choose Connect to continue.';
-    if (continuity?.connectRequired) return 'Could not connect to this computer. Make sure it is on and online, then choose Connect again.';
-    if (connection === 'denied') return 'This computer did not accept the connection. Make sure this workspace is approved on it, then choose Connect again.';
+    if (continuity?.connectRequired) return 'Could not connect to this computer. Make sure it is on and online, then choose Connect.';
+    if (connection === 'denied') return 'This computer did not accept the connection. Make sure this workspace is approved on it, then choose Connect.';
     if (['disconnected','signed_out'].includes(connection)) return 'Disconnected from this computer. Choose Connect to continue.';
     return 'The connection to this computer could not be confirmed. Choose Check connection to look again.';
   }
@@ -402,6 +403,22 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
       close() { closed = true; stream.detach(); streams.delete(stream); }};
     streams.add(stream); stream.attach(); return stream;
   }
+  // Browser carrier only: the website's hand-off has just bound this computer, so the view connects it once by itself.
+  // One latch for the frame's whole life: after that attempt, or once the computer has been seen in any other state
+  // (an expiry, a failure, a denial, a Disconnect), Connect is only ever a press. A hidden page waits, still at most once.
+  let autoConnectTried = false;
+  function autoConnect() {
+    if (!browserTransport || !connectOnHandoff || autoConnectTried || disposed || phase !== 'ready' || accountUnavailable || loading || !mount) return;
+    const bound = boundReference(); if (bound === null) return;
+    const index = clients.findIndex(row => row.reference.reference_id === bound); if (index < 0) return;
+    const {client, enrollment} = clients[index], continuity = client.continuity?.();
+    const connection = client.connectionState?.() || client.snapshot().state;
+    if (connection === 'checking') return; // not yet known: look again at the next change
+    if (connection !== 'not_connected' || continuity?.ended || continuity?.connectRequired || continuity?.reconnectRequired) { autoConnectTried = true; return; }
+    if (mount.document.visibilityState !== 'visible' || pending.has(index) || enrollment.snapshot().busy) return;
+    autoConnectTried = true; clients[index].setup.connectedByEntry?.();
+    void act(index, 'connect').then(done => { if (!done) clients[index]?.setup.connectRefused?.(); });
+  }
   async function act(index, operation) {
     if (disposed || phase !== 'ready' || !current) return false;
     const row = clients[index]; if (!row || pending.has(index) || !['connect','check','renew','logout','enroll'].includes(operation) || row.enrollment.snapshot().busy) return false;
@@ -637,6 +654,7 @@ export function createConnectedWorkspace({ documentContext, documentOrigin = glo
     invoke(() => { const main = document.querySelector('main'), listed = controls.rows.filter(({row}) => !row.hidden).length;
       if (main) { if (listed) main.dataset.computers = String(listed); else { delete main.dataset.computers; delete main.dataset.teams; } } });
     for (const event of attentionCleared) invoke(mount.onConnectionAttentionCleared, event);
+    if (browserTransport && !autoConnectTried) void Promise.resolve().then(autoConnect);
     // Browser carrier. The working form (the bound computer ready with a team, no Launch followed or unfinished, or the
     // same computer through a lapse of its session) is the connected view of that computer: no setup marker, and its
     // parts sit above its teams (below). Otherwise the setup form: <html data-workspace-view="setup">, under which

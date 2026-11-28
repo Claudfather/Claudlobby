@@ -2811,12 +2811,14 @@ function framedPage(ui) {
 }
 // One localStorage per test, restored once after every landing in it closes (t.after runs first-in, first-out).
 const landingStorage=new WeakMap();
-function landing(t,{bound=landingRefs[0].reference_id,browser=true,attention=[],references=landingRefs,metadata}={}) {
+// Most landing tests press Connect themselves, so landing() runs with the automatic first connect OFF unless a test
+// passes auto:true; tests that say "(automatic connect off)" are about the pressed path, the ones with auto on are about what ships.
+function landing(t,{bound=landingRefs[0].reference_id,browser=true,attention=[],references=landingRefs,metadata,auto=false,createClient}={}) {
   if(!landingStorage.has(t)){const restore=stubLocalStorage();landingStorage.set(t,[]);t.after(()=>{for(const close of landingStorage.get(t))close();restore();});}
   const h=harness({references}),frame=framedPage(h.ui),carrier=browser?browserCarrier(h,bound):null;
   if(metadata)h.metadata=metadata;
   if(browser)h.api.dispose();
-  const workspace=browser?createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch}):h.api;
+  const workspace=browser?createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch,connectOnHandoff:auto,...(createClient?{createClient}:{})}):h.api;
   landingStorage.get(t).push(()=>workspace.dispose()); // the guide keeps its saved setup in localStorage, as in a browser
   workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session'),onConnectionAttention:event=>attention.push(event)});
   const cards=()=>h.ui.get('owner-session').children.filter(e=>e.className==='connection-card');
@@ -2832,7 +2834,7 @@ function landing(t,{bound=landingRefs[0].reference_id,browser=true,attention=[],
 const stepNode=(panel,name,className)=>descendants(stepsOf(panel).find(n=>n.dataset.step===name)).find(n=>n.className===className);
 // Plain sentences only: no raw state names (not_connected, setup_only) and no builder vocabulary.
 const assertPlain=texts=>{for(const text of texts)assert.doesNotMatch(text,/\b[a-z]+_[a-z_]+\b|snapshot|summar(?:y|ies) are|remediation|host data/i,text);};
-test('browser carrier opens on its bound computer: a focused panel whose first step is an explicit Connect',async t=>{
+test('browser carrier opens on its bound computer: a focused panel whose first step is an explicit Connect (automatic connect off)',async t=>{
   const l=landing(t);await l.workspace.checkAccount();await flush();
   assert.deepEqual(l.shownCards(),['a.example.test · Not connected'],'computers this carrier cannot reach are not listed');
   assert.equal(l.cards().length,3,'every saved computer is still admitted; only the bound one is shown');
@@ -2878,7 +2880,7 @@ test('browser carrier opens on its bound computer: a focused panel whose first s
     'reading the approval is the only setup call; sign-in waits for its own click');
   assert.deepEqual(l.shownCards(),['a.example.test · First-team setup']);
 });
-test('a failed approval read after Connect keeps Check setup approval, focuses it and does not retry',async t=>{
+test('a failed approval read after Connect keeps Check setup approval, focuses it and does not retry (automatic connect off)',async t=>{
   const l=landing(t);await l.workspace.checkAccount();await flush();
   l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/issue',setupOnlyIssue);
   l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/setup/context',()=>reply(503,{}));
@@ -2956,14 +2958,99 @@ test('a panel disposed during the approval read moves no focus',async()=>{
 });
 
 
-test('a refused Connect from the panel keeps Connect, says why, and returns focus to it without retrying',async t=>{
+// Connecting by itself, once: the browser carrier's first connect follows the website's hand-off. Nothing else ever
+// connects without a press.
+const connects=l=>l.h.calls.filter(c=>c.url.endsWith('/api/owner/connected/challenge')).length;
+const settle=async l=>{await l.workspace.checkAccount();await flush();};
+const aState=l=>l.workspace.snapshot().computers[0].state;
+test('the browser carrier connects its bound computer once by itself when it is admitted, ready and not connected',async t=>{
+  const l=landing(t,{auto:true});await settle(l);
+  assert.equal(connects(l),1);assert.equal(aState(l),'ready');
+  l.h.timer(30000);await flush();l.workspace.checkAccount();await flush();
+  assert.equal(connects(l),1,'never a second connect');
+});
+test('a hidden page does not connect by itself, and connects once when it becomes visible',async t=>{
+  const l=landing(t,{auto:true});l.h.ui.document.visibilityState='hidden';await settle(l);
+  assert.equal(connects(l),0);assert.notEqual(aState(l),'ready');
+  l.h.ui.document.visibilityState='visible';l.h.ui.listeners.get('visibilitychange')();await flush();
+  assert.equal(connects(l),1);assert.equal(aState(l),'ready');
+  l.h.ui.listeners.get('visibilitychange')();await flush();assert.equal(connects(l),1,'once only');
+});
+test('outside the browser carrier nothing connects by itself',async t=>{
+  const l=landing(t,{browser:false});await settle(l);
+  assert.equal(connects(l),0);assert.notEqual(aState(l),'ready');
+  const other=landing(t,{auto:true,bound:null});await settle(other);assert.equal(connects(other),0,'a carrier that bound no computer connects none');
+});
+test('after a failed connect, an unknown outcome or a denial the view never connects by itself again',async t=>{
+  const origin=landingRefs[0].endpoint_origin;
+  for(const [name,answer] of [['failure',()=>reply(503,{})],['unknown outcome',()=>{throw new Error('lost');}],['denial',()=>reply(403,{state:'denied'})]]){
+    const l=landing(t,{auto:true});l.h.overrides.set(origin+'/api/owner/connected/challenge',answer);
+    await settle(l);assert.equal(connects(l),1,name);
+    l.h.timer(30000);await flush();await settle(l);
+    l.workspace.snapshot();assert.equal(connects(l),1,name+': no second connect');assert.notEqual(aState(l),'ready',name);
+  }
+});
+test('the one-shot latch holds even when the read keeps saying not connected',async t=>{
+  let presses=0;
+  const createClient=options=>{const client=createConnectedReadClient(options);
+    return {...client,connectionState:()=>presses>3?'checking':'not_connected',connect:async()=>{presses++;return false;}};};
+  const l=landing(t,{auto:true,createClient});await settle(l);
+  assert.equal(presses,1);
+  for(let i=0;i<3;i++){l.h.timer(30000);await flush();await settle(l);l.h.ui.listeners.get('visibilitychange')();await flush();}
+  assert.equal(presses,1,'a read that stays not connected never connects again');
+});
+test('after an expiry the view never connects by itself again; a press does',async t=>{
+  const l=landing(t,{auto:true});await settle(l);assert.equal(connects(l),1);
+  l.h.time=900000;l.h.timer(900000);await flush();await settle(l);
+  assert.equal(aState(l),'unavailable');assert.equal(connects(l),1,'a tab left open does not hold the session');
+  assert.equal(await l.workspace.act(0,'connect'),true);assert.equal(connects(l),2,'only a press');
+});
+test('after Disconnect the view never connects by itself again',async t=>{
+  const l=landing(t,{auto:true});await settle(l);assert.equal(aState(l),'ready');
+  await l.workspace.act(0,'logout');await flush();await settle(l);
+  l.h.ui.listeners.get('visibilitychange')();await flush();
+  assert.equal(connects(l),1);assert.notEqual(aState(l),'ready');
+  assert.equal(await l.workspace.act(0,'connect'),true);assert.equal(connects(l),2,'only a press');
+});
+test('connecting by itself to a computer in first-team setup reads the approval too and lands on Sign in to Claude',async t=>{
+  const l=landing(t,{auto:true}),a=landingRefs[0].endpoint_origin+'/api/owner/connected/';
+  l.h.overrides.set(a+'issue',setupOnlyIssue);l.h.overrides.set(a+'setup/context',()=>reply(200,landingContext));
+  await settle(l);await flush();
+  const panel=l.panel();
+  assert.deepEqual(l.mutations().map(c=>new URL(c.url).pathname.split('/').at(-1)),['challenge','issue','context'],'the same calls as a pressed Connect');
+  assert.equal(connects(l),1,'no second connect');
+  assert.deepEqual(stepShape(panel).map(row=>row.slice(0,2)),[['connect','done'],['approve','done'],['signin','current'],['goal','upcoming'],['launch','upcoming']]);
+  assert.deepEqual(stepsOf(panel).filter(visible).map(filledIn),[[],[],['Sign in to Claude'],[],[]]);
+  assert.notEqual(l.h.ui.document.activeElement?.textContent,'Sign in to Claude','the view never moves focus by itself');
+  l.h.timer(30000);await flush();assert.equal(connects(l),1);
+});
+test('connecting by itself to a computer with a kept launch reads its receipt once',async t=>{
+  landing(t); // stubs this test's localStorage
+  const key=`claudlobby:first-team:${id(1)}:${id(2)}:${id(3)}:${landingRefs[0].reference_id}:1`;
+  globalThis.localStorage.setItem(key,JSON.stringify({version:2,pending:settingUp,conflicts:[],legacy:[]}));
+  globalThis.localStorage.setItem(key+':launch',JSON.stringify(settingUp)); // the computer once said this Launch was reserved
+  const l=landing(t,{auto:true}),setup=landingRefs[0].endpoint_origin+'/api/owner/connected/setup/';
+  l.h.overrides.set(setup+'state',()=>reply(200,partsAnswer({computer:'started',teams:1,team:{state:'launch_unfinished'}})));
+  l.h.overrides.set(setup+'receipt',()=>reply(200,{...settingUp,version:2,launch_reserved:true,config_committed:true,health_errors:{},state:'quiesce'}));
+  await settle(l);await flush();
+  assert.equal(connects(l),1);assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/receipt')).length,1,'the kept launch\'s receipt is read once');
+  assert.equal(l.h.calls.filter(c=>c.url.endsWith('/setup/launch')).length,0,'never a second Launch');
+  assert.match(descendants(l.panel()).find(n=>n.className==='setup-note').textContent,/^Launch received\./);
+});
+test('a failed recheck while hidden stops the automatic connect when the page is shown',async t=>{
+  const l=landing(t,{auto:true});l.h.ui.document.visibilityState='hidden';await settle(l);
+  assert.equal(connects(l),0);
+  l.h.metadataStatus=503;l.h.ui.document.visibilityState='visible';l.h.ui.listeners.get('visibilitychange')();await flush();await flush();
+  assert.equal(connects(l),0,'the account check has not answered ready');
+});
+test('a refused Connect from the panel keeps Connect, says why, and returns focus to it without retrying (automatic connect off)',async t=>{
   const l=landing(t);await l.workspace.checkAccount();await flush();
   l.h.overrides.set(landingRefs[0].endpoint_origin+'/api/owner/connected/challenge',()=>reply(503,{}));
   const panel=l.panel(),button=descendants(stepsOf(panel)[0]).find(n=>n.tagName==='BUTTON');
   button.focus();button.click();await flush();
   assert.equal(l.mutations().length,1,'one challenge, no retry');
   assert.equal(stepShape(panel)[0][1],'current');assert.equal(button.disabled,false);assert.equal(button.textContent,'Connect');
-  assert.equal(stepNode(panel,'connect','setup-hint').textContent,'Could not connect to this computer. Make sure it is on and online, then choose Connect again.');
+  assert.equal(stepNode(panel,'connect','setup-hint').textContent,'Could not connect to this computer. Make sure it is on and online, then choose Connect.');
   assertPlain(l.shownText());
   assert.equal(l.h.ui.document.activeElement,button,'focus returns to Connect');
   assert.equal(l.rail.dataset.setupFocus,'only');
@@ -3106,7 +3193,7 @@ test('setup-only view posts its content height to the exact shell origin, once p
 test('a framed setup-only view without ResizeObserver still announces ready and posts no size',async t=>{
   const restore=stubLocalStorage(),h=harness({references:landingRefs}),frame=framedPage(h.ui),carrier=browserCarrier(h,landingRefs[0].reference_id);
   h.api.dispose();delete frame.view.ResizeObserver;
-  const workspace=createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch});t.after(()=>{workspace.dispose();restore();});
+  const workspace=createConnectedWorkspace({...h.dependencies,fetch:carrier.fetch,connectOnHandoff:false});t.after(()=>{workspace.dispose();restore();});
   workspace.mountSessionControls({document:h.ui.document,element:h.ui.get('owner-session')});await workspace.checkAccount();await flush();
   assert.deepEqual(frame.posts,[[{type:'claudfather.workspace.ready',version:1},documentContext.shell_origin],
     [{type:'claudfather.workspace.form',version:1,form:'setup'},documentContext.shell_origin]]);
@@ -4490,7 +4577,7 @@ const idleUntilExpiry=async l=>{
   l.h.time=900000;l.h.timer(900000);await flush();
   assert.equal(l.workspace.snapshot().computers[0].state,'unavailable','the session ran out');
 };
-test('a healthy launched team left idle until its session runs out keeps the working form, and Connect brings it back',async t=>{
+test('a healthy launched team left idle until its session runs out keeps the working form, and Connect brings it back (automatic connect off)',async t=>{
   const {l}=await bridgedLaunch(t,cleanDone),a=landingRefs[0].endpoint_origin,posts=l.frame.sizes().length;
   assert.equal(setupMarker(l),undefined);assert.deepEqual(formsPosted(l),['setup','working']);
   await idleUntilExpiry(l);
@@ -5418,7 +5505,7 @@ test('linked wins over an ended sign-in',async t=>{
   const live=await claudePage(t,partsAnswer({provider:{state:'linked',link:'available',signin:signinPartOf({phase:'waiting',attempt_id:id(32),state:'waiting'})}}));
   assert.equal(claudeLine(live.l).textContent,claudeSentences.saved);assert.equal(live.l.h.calls.filter(c=>c.url.endsWith('/setup/signin-status')).length,0,'no sign-in step for a linked computer');
 });
-test('before Connect no first-team heading',async t=>{
+test('before Connect no first-team heading (automatic connect off)',async t=>{
   const l=landing(t);await l.workspace.checkAccount();await flush();
   const panel=l.panel(),heading=panel.children.find(n=>n.tagName==='H2');
   assert.equal(heading.textContent,'a.example.test');

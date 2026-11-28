@@ -120,7 +120,7 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
   // connectFocus follows one panel click ('sent', then 'busy') so keyboard focus lands on the next action.
   // standalone: the panel is the whole view (no computer card or workspace beside it).
   // launchedFor: the binding a clean done receipt was for; a rebound request is not launched.
-  let onConnect=null, connectView=null, connectFocus=null, standalone=false, launchedFor=null;
+  let onConnect=null, connectView=null, connectFocus=null, connectQuiet=false, standalone=false, launchedFor=null;
   // followed: in this page's lifetime the panel sent a Launch, sent a launch status check or followed a hand-off.
   // Never saved: a request kept in storage from an earlier page is not followed until this page acts on it.
   // The follow ends at a clean done receipt for the current request (launched()); see following().
@@ -650,16 +650,17 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     if (connectFocus && live) {
       // Checking setup approval only reads it, so after a Connect chosen here the panel does that itself while the
       // computer is still in first-team setup. Focus then moves to the next action (Check setup approval if the read failed).
-      connectFocus = null;
+      connectFocus = null; const quiet = connectQuiet; connectQuiet = false;
       queueMicrotask(async () => {
         const seen = launchSeen;
         if (client.snapshot().state === 'setup_only') await run('context');
         if (!disposed && mount === m) await readSeenLaunch(seen);
-        if (!disposed && mount === m && focusFree()) nextAction(m)?.focus?.();
+        if (!disposed && mount === m && !quiet && focusFree()) nextAction(m)?.focus?.();
       });
     }
     else if (connectFocus === 'busy' && !connectView?.busy) {
-      connectFocus = null; if (!m.connect.button.disabled && focusFree()) m.connect.button.focus?.();
+      connectFocus = null; const quiet = connectQuiet; connectQuiet = false;
+      if (!quiet && !m.connect.button.disabled && focusFree()) m.connect.button.focus?.();
     }
   }
   // Steps in order, each with a mark workspace.css draws from its state (✓ once done); only the current step shows its body. Long approval text, the counts and identifiers sit under Technical details.
@@ -748,6 +749,10 @@ export function createGuidedSetup({client, storage, storageKey, now = () => Date
     // Whether this page follows a Launch it sent or followed (see followed) that has not ended in a clean done
     // receipt; the entry keeps the panel while it does. Once launched, the page is treated like one opened again.
     following:() => followed && !launched(),
+    // The entry connected by itself (the one automatic first connect): the panel runs the same follow-up reads as after
+    // its own Connect, the setup approval read and a kept launch's receipt read, but never moves keyboard focus.
+    connectedByEntry() { if (disposed || !mount) return false; connectFocus = 'sent'; connectQuiet = true; return true; },
+    connectRefused() { if (connectFocus === 'sent') { connectFocus = null; connectQuiet = false; } },
     // Presentation only: how the entry's Connect looks now. It never connects or sends anything itself.
     showConnect(value) {
       const next = value && typeof value === 'object' ? {operation:value.operation === 'check' ? 'check' : 'connect',

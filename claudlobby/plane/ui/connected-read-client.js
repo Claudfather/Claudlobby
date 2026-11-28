@@ -525,7 +525,7 @@ export function createConnectedReadClient({ reference, documentContext, currentC
           ? 'Computer connection challenge failed or was refused. No session issue was sent. Check Tailscale and Set up computer access for local owner approval, then choose Connect explicitly.'
           : stage === 'assertion'
           ? 'Website access check did not complete. No session issue was sent. Check your account, then choose Connect explicitly.'
-          : 'Sign-in did not complete after requesting a session. Its host outcome is unknown; choose Connect again explicitly.');
+          : 'Sign-in did not complete after requesting a session. Its host outcome is unknown; choose Connect explicitly.');
       }
       return false;
     } finally { busy = false; scheduleContinuity(); }
