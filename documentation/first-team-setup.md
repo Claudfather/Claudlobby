@@ -49,6 +49,10 @@ client names: the client's pinned revision decides what is installed, as it
 does for preparation. The [owner SSH carrier](architecture/owner-ssh-carrier.md)
 lists their requests, answers and refusals.
 
+## Starting again
+
+A computer that was prepared at an older revision and whose team was never started cannot be prepared again at a newer one. The preparation script has two actions for it, `start-again-status` and `start-again`. The first writes nothing and answers whether the computer is `eligible`. The second removes what the preparation and the guide's first steps left, and only that: the install, the data (with its approvals and any Claude sign-in saved in it), staging, the settings file, the Claude program and its profile. It refuses, removing nothing, when a team was ever started, when something runs, when a name in those folders is not one this product writes, or when the first-team folder holds something. It never touches that folder, the units, the Tailscale connection, system tools or the Mac runtime. After it, `prepare` runs at the new revision and the guide asks its approvals again. The [owner SSH carrier](architecture/owner-ssh-carrier.md) lists the requests, answers and refusals. It stays inert until the website admits the actions and the owner decides to use them.
+
 ## Browser connection remains a separate gate
 
 The existing workspace/owner boundary requires native identity and private ingress, explicit pairing, workspace binding and exact local launch/action grants. Managed Git preparation grants none of those. Browser reading does not grant messages, task feedback or permission decisions, and those grants do not authorize repository merges or deployments.

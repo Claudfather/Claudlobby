@@ -478,6 +478,86 @@ replaced since preparation is reported as `interpreter: changed`; on Linux the
 trusted system Python is admitted by trust rather than bytes, so every action
 goes on and the receipt keeps its digest.
 
+## Starting again on a computer that never started
+
+`host-install-v1.sh` has two more actions for a computer that was prepared (and
+may have had setup cards approved) but whose team was never started. They take
+the same request line as `prepare` and `status`: `schema_version` 1,
+`source_revision` (the pin the client wants) and `expected_uid`. They delete
+files on the person's computer, so they refuse by default. Each answer is one
+canonical line of at most 8192 bytes.
+
+| Action | Operation | Answer |
+|---|---|---|
+| `start-again-status` | `host-start-again-status-v1` | `state` `eligible` (`next` `start_again`), `absent` (`next` `prepare`), or a refusal |
+| `start-again` | `host-start-again-v1` | `state` `removed` (`next` `prepare`), `absent`, or a refusal |
+
+A refusal is `state` `refused` with a `code` (exit 4), or `state` `busy` with
+`preparation_in_progress` (exit 4). A malformed request is `invalid_request`
+(exit 2). Anything not listed here is `state` `unavailable`, `code` `unavailable`
+(exit 6), and the client reads `start-again-status` again. Codes: `account_changed`
+(the account, or on a Mac the admitted runtime, is not this installer's),
+`already_current` (the receipt is already at the requested revision: use
+`prepare`), `identity_changed` (the receipt, `installation.json` or the checkout's
+commit is not what this installer wrote), `started` (a sign that a team ran, below),
+`in_use` (a lock is held: a launcher, an update, the owner connection, Preview or a
+Claude sign-in), `unknown_content` (a name, kind, owner, mode or device the installer
+does not write, a link where a folder belongs, or a changed device) and
+`first_team_not_empty` (`~/claudfather-projects/first-team` holds something, which
+the next guide would refuse). Nothing is removed on any refusal.
+
+The checks run in this order, under the locks. The account check; then a look for an
+unfinished `start-again/` folder, first, because after `install/` has moved nothing
+else shows the computer was prepared (a family folder with neither is `absent`; one
+holding other content but no `install/` is `unknown_content`). Then, in order,
+`install/preparation.lock` (the preparation), `data/state/runtime-use.lock`,
+`update.lock` (when it exists), `owner/owner.sock.lock`, `setup-preview.lock` and
+`provider-signin.lock`. These locks are opened without the preparation lock's empty-file
+rule, because some hold bytes. Then: the receipt (every binding field except the
+revision, the Linux interpreter digest exempt, `installation.json` exact, the checkout's
+`HEAD` equal to the receipt's revision; a preparation that stopped before it finished
+may lack or part-have its checkout and environment); the never-started list; the units
+folder; the first-team folder; and the exact content list. The never-started list is
+`data/runtime`, `data/local`, and in `data/state` `config.json`, `selected-release.json`,
+`update.json`, `update-work`, `releases`, `activations`, `migrations`, `config-plans`,
+`restored-backup*`, `setup-finish-*` and `plane/plane.db*`; the updater's job definition
+in `install/bin`; any systemd unit file (a name beginning `claudlobby`, or ending in a unit
+suffix) on Linux; a LaunchAgent named `com.claudlobby.*` or `claudlobby-*` on a Mac. The
+content list names, for each folder, every file this product writes there, including the
+leftovers a crash can leave (`.update-*`, `.installation-*`, `.launcher-*`, `.host-uid.*.tmp`,
+`.owner-access-*`, `.owner-policy-*`, `.claude-stage-*`, a sign-in attempt's folder);
+`src`, `env`, `staging` and `provider-profile` are owned trees, checked only for kinds,
+owner and device. Removal then moves `data`, `staging`, `provider-profile`,
+`provider-bin`, `host-policy` and last `install` into `family/start-again`, syncs, and deletes
+with a walk that never follows a link and refuses to cross a device. Every lock is held
+through the last rename. A second press finishes an interrupted removal, or runs every check
+again if `install/` is still in place.
+
+What is kept: the first-team folder, units, the Mac `runtime/` (Mac only), and on Linux the
+team account, linger, System tools, the Serve route and root receipts.
+
+`start-again-status` writes nothing and takes no lock exclusively. It holds the preparation
+lock shared, and probes each other lock shared for an instant. A launcher takes
+`runtime-use.lock` shared, so a probe never disturbs it, but the status cannot see a running
+launcher: only `start-again`, which takes that lock exclusively, does. What a probe can disturb,
+for that instant, is a process that takes a lock exclusively without retrying: an owner server
+("already has a running server") and Launch ("another update is running"). Preview and the
+sign-in lease retry 50 times at 10 ms. `start-again` creates no file: a missing `update.lock`
+is skipped, because the exclusive `runtime-use.lock` already shuts out every process that makes
+it before a Launch, and a refusal leaves the computer byte-identical.
+
+The carrier must give `start-again` a long budget of at least 130 seconds (the installer's own
+is 120); the default 20 seconds would cut a slow delete. That is safe, since a second press
+finishes it. `start-again-status` fits the short budget (the installer's own is 15 seconds).
+
+On a Mac, the guide holds no lock between its operations: close other setup tabs before
+pressing Start again. When the managed runtime is not admitted the shell answers `unavailable`
+(exit 6) for these actions, not `runtime_not_admitted`; a pin that changes the Mac runtime
+descriptor therefore makes them unreachable on a Mac, which is out of scope here. Update
+operations remain Linux only. The website carrier must admit the two actions on both systems,
+with the Mac request shape and the `/bin/` prefix; that is future work. Until then they are
+inert, and gated on the owner's decision.
+
 ## Launch
 
 The updater cannot advance while any process still holds a runtime reader. The
