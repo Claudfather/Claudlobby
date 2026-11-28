@@ -153,10 +153,13 @@ One line per script, for routing; operators use the public CLI. **Before changin
 `claudlobby/preinstall/linux-system-v1.sh` is the sole root-native exception to the
 bot `supervisor.sh` door: a pinned standalone stdlib bundle cannot execute an
 ordinary-user installation as root. Its fixed Ubuntu24 apt/system-manager/linger
-and native Serve CAS operations use root-owned immutable proposals and mutable retained state receipts;
-it never imports user code or supervises bots. Native/cold qualification remains
-open. The existing bot/lifecycle adapter policy is unchanged. Tests fence this
-exception in `tests/test_supervisor_ratchet.py`.
+operations, its one fixed `/usr/sbin/useradd` call that creates the team account
+`claudlobby` (run once, before apt, with a uid the bundle computes itself), and native
+Serve CAS operations use root-owned immutable proposals and mutable retained state receipts;
+it never imports user code, supervises bots, or changes or removes any other account.
+Native/cold qualification remains open. The existing bot/lifecycle adapter policy is
+unchanged. Tests fence this exception, `useradd` included, in
+`tests/test_supervisor_ratchet.py`.
 
 ## Repository Hygiene — MANDATORY
 
@@ -241,7 +244,7 @@ Each library category has its own format. Check the category's `README.md` for s
 4. Apply the reviewed commit with `host update apply FULL_COMMIT`; inspect status and behavior. First installation follows the getting-started guide.
 5. Commit to a branch, PR, review
 
-**Before writing or trusting a test, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite can go red, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it.
+**Before writing or trusting a test, read [`documentation/test-suite.md`](documentation/test-suite.md).** Never test from a live fleet root; run unsandboxed; the suite can go red, so compare two separately prepared exports (before, after) on failing test **names**, the **counts** line and the **exit code**; never pipe pytest into grep; quarantine a flaky test (`@pytest.mark.quarantine(issue=<N>)`), never deselect it. Open a pull request as a draft while you iterate: a draft runs the Linux lanes only, and marking it ready for review starts the run that adds macOS.
 
 ### Adding or modifying claudlobby/_runtime_scripts/ scripts
 

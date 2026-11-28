@@ -6,18 +6,39 @@
 # single <=8192-byte result plus exit status; the current browser door cannot
 # carry this operation. Budgets: prepare 900s, status 15s including child drain.
 # recorded_complete is retained preparation evidence, never fresh runtime or
-# dependency readiness. After unknown dispatch, inspect only; absent is an
-# observation and cannot authorize an automatic retry or prove remote shutdown.
+# dependency readiness. Status alone reports recorded_in_use for that same
+# verified preparation once this product's own setup has added to it (its
+# updater's job definition included); it reads none of that later state, and
+# prepare still refuses it rather than adopt or replace anything. After unknown
+# dispatch, inspect only; absent is an observation and cannot authorize an
+# automatic retry or prove remote shutdown.
+# The update actions (update-status, update, update-continue) read and move an
+# installation this script prepared: one canonical line naming expected_uid and
+# the action's own keys; their answers carry the action's own names.
+# update-status asked with ingress_node_key also reads, writing nothing, whether
+# Tailscale Serve already holds exactly the route the root ingress card would set.
 operation=host-install-v1
-if [ "$#" -eq 1 ] && [ "$1" = status ]; then operation=host-install-status-v1; fi
+if [ "$#" -eq 1 ]; then
+    case "$1" in
+        status) operation=host-install-status-v1 ;;
+        update-status) operation=host-update-status-v1 ;;
+        update) operation=host-update-v1 ;;
+        update-continue) operation=host-update-continue-v1 ;;
+    esac
+fi
 refuse() {
-    printf '{"account_uid":null,"activated":false,"binding_sha256":null,"code":"%s","next":"%s","operation":"%s","prepared":false,"schema_version":1,"source_revision":null,"state":"%s"}\n' "$1" "$2" "$operation" "$3"
+    case "$operation" in
+        host-install-v1|host-install-status-v1)
+            printf '{"account_uid":null,"activated":false,"binding_sha256":null,"code":"%s","next":"%s","operation":"%s","prepared":false,"schema_version":1,"source_revision":null,"state":"%s"}\n' "$1" "$2" "$operation" "$3" ;;
+        *) case "$1" in invalid_request) ;; *) set -- unavailable "$2" unavailable ;; esac
+           printf '{"code":"%s","operation":"%s","schema_version":1,"state":"%s"}\n' "$1" "$operation" "$3" ;;
+    esac
 }
 if [ "$#" -ne 1 ]; then refuse invalid_request stop refused; exit 2; fi
-case "$1" in prepare|status) ;; *) refuse invalid_request stop refused; exit 2 ;; esac
+case "$1" in prepare|status|update-status|update|update-continue) ;; *) refuse invalid_request stop refused; exit 2 ;; esac
 exec 3<<'FIXED_OPERATION_PYTHON'
 # BEGIN EMBEDDED PYTHON
-# Embedded stdlib operation. The shell selects only prepare or status.
+# Embedded stdlib operation. The shell selects prepare, status or an update action.
 import sys
 import time
 STARTED = time.monotonic()
@@ -43,10 +64,30 @@ FIELDS = {"schema", "purpose", "installation", "data_root", "remote", "ref", "in
 GIT_FLAGS = ["--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
              "-c", "credential.helper=", "-c", "core.askPass=/bin/false", "-c", "http.sslVerify=true",
              "-c", "maintenance.auto=false", "-c", "gc.auto=0"]
-BUDGETS = {"prepare": 900, "status": 15}
+BUDGETS = {"prepare": 900, "status": 15, "update-status": 15, "update": 900, "update-continue": 900}
+UPDATE_ACTIONS = {"update-status": "host-update-status-v1", "update": "host-update-v1",
+                  "update-continue": "host-update-continue-v1"}
+# Required, then optional, request keys of each update action.
+UPDATE_KEYS = {"update-status": ({"schema_version", "expected_uid"}, {"compare_revision", "ingress_node_key"}),
+               "update": ({"schema_version", "expected_uid", "expected_installed_revision", "target_revision"}, set()),
+               "update-continue": ({"schema_version", "expected_uid", "request_id"}, set())}
+# The updater's exit, before any dispatch, for an undispatched team preparation:
+# continue --expected-request, and apply for that team's own target.
+NOT_CONTINUABLE_EXIT = 7
+# Each update action's refusals; any other code is answered as unavailable (exit 6),
+# and a malformed request as invalid_request (exit 2).
+UPDATE_REFUSALS = {"update-status": set(),
+                   "update": {"not_prepared", "installed_changed", "already_current", "update_in_progress",
+                              "not_forward", "needs_reset"},
+                   "update-continue": {"not_prepared", "no_such_request", "nothing_to_continue", "not_continuable"}}
 SHA = re.compile(r"[0-9a-f]{40}")
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
+NODE_KEY = re.compile(r"nodekey:[0-9a-f]{64}")
 MAX_CHILD_OUTPUT = 2 * 1024 * 1024
+# The fixed directories this product's own setup guide adds beside a completed
+# preparation (commands/owner_setup_consent.py: policy, provider, account).
+SETUP_FAMILY = {"host-policy", "provider-bin", "provider-profile"}
 
 
 class Refusal(Exception):
@@ -75,7 +116,7 @@ def unique(pairs):
     return result
 
 
-def request(fd, deadline):
+def request(fd, deadline, action=None):
     raw = bytearray()
     limit = min(deadline - 4, time.monotonic() + 5)
     import select
@@ -93,6 +134,11 @@ def request(fd, deadline):
         if not raw.endswith(b"\n") or raw.count(b"\n") != 1 or any(c < 32 or c > 126 for c in raw[:-1]):
             raise ValueError()
         value = json.loads(raw, object_pairs_hook=unique)
+        if action in UPDATE_ACTIONS:
+            if (not update_request(action, value)
+                    or raw != (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")):
+                raise ValueError()
+            return value
         if (not isinstance(value, dict) or set(value) != {"schema_version", "source_revision", "expected_uid"}
                 or type(value["schema_version"]) is not int or value["schema_version"] != 1
                 or not isinstance(value["source_revision"], str) or not SHA.fullmatch(value["source_revision"])
@@ -102,6 +148,19 @@ def request(fd, deadline):
         return value
     except (ValueError, TypeError, UnicodeError):
         raise Refusal("invalid_request", exit_code=2) from None
+
+
+def update_request(action, value):
+    required, optional = UPDATE_KEYS[action]
+    return (isinstance(value, dict) and required <= set(value) <= required | optional
+            and type(value["schema_version"]) is int and value["schema_version"] == 1
+            and type(value["expected_uid"]) is int and 0 < value["expected_uid"] < 2**32 - 1
+            and all(isinstance(value[key], str) and SHA.fullmatch(value[key]) for key in value
+                    if key in {"compare_revision", "expected_installed_revision", "target_revision"})
+            and ("request_id" not in value or isinstance(value["request_id"], str)
+                 and UUID.fullmatch(value["request_id"]) is not None)
+            and ("ingress_node_key" not in value or isinstance(value["ingress_node_key"], str)
+                 and NODE_KEY.fullmatch(value["ingress_node_key"]) is not None))
 
 
 def plain_file(path, limit, mode=0o600, owner=None):
@@ -173,11 +232,8 @@ import uuid
 
 PROFILE_ID = "darwin15-arm64-py31216-git2561-tmux38-jq182-v1"
 LIMIT = 16384
-BUDGET = 900
-_INHERITED_LOCK_FD = None
 ALIASES = {"python3": "../python/bin/python3.12", "git": "../git/bin/git",
            "tmux": "../tmux/bin/tmux", "jq": "../jq/bin/jq"}
-CA_MEMBER = "lib/python3.12/site-packages/pip/_vendor/certifi/cacert.pem"
 # BEGIN FIXED DESCRIPTOR
 _DESCRIPTOR = {
     "artifacts": {
@@ -273,15 +329,6 @@ def _uuid(value):
         return False
 
 
-def validate_request(operation, value):
-    _require(operation in ("prepare", "status", "discard"), "invalid_operation")
-    _require(type(value) is dict and set(value) == {"schema_version", "request_id", "expected_uid", "expected_account"}, "invalid_request")
-    _require(type(value["schema_version"]) is int and value["schema_version"] == 1 and _uuid(value["request_id"]), "invalid_request")
-    _require(type(value["expected_uid"]) is int and 0 < value["expected_uid"] < 2**32 - 1, "invalid_request")
-    _require(type(value["expected_account"]) is str and re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]{0,63}", value["expected_account"]), "invalid_request")
-    return value
-
-
 def _parents(path, uid):
     for parent in reversed(path.parents):
         info = parent.lstat()
@@ -358,34 +405,6 @@ def _load(path, uid, *, mode=0o600):
         raise RuntimeRefusal("invalid_retained_metadata") from None
 
 
-def _sync(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _save(path, value, uid, *, new=False):
-    raw = _canonical(value)
-    _require(len(raw) <= LIMIT, "metadata_oversize")
-    if new:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as out:
-            out.write(raw); out.flush(); os.fsync(out.fileno())
-    else:
-        _read(path, uid)
-        fd, temporary = tempfile.mkstemp(prefix=".record-", dir=path.parent)
-        try:
-            with os.fdopen(fd, "wb") as out:
-                out.write(raw); out.flush(); os.fsync(out.fileno())
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-    _sync(path.parent)
-
-
 def _binding(identity):
     return {"uid": identity.uid, "account": identity.account, "home": str(identity.home), "arch": "arm64",
             "profile_id": PROFILE_ID, "policy_sha256": _policy()}
@@ -416,97 +435,11 @@ def _tree(path, uid, *, staged=False):
     return _sha(_canonical(sorted(records, key=lambda row: row["name"])))
 
 
-def _safe_name(name):
-    _require(name and not name.startswith("/") and "\\" not in name and
-             all(part not in ("", ".", "..") for part in name.split("/")), "unsafe_archive_name")
-    return name
-
-
 def _safe_link(name, target):
     _require(target and not target.startswith("/") and "\\" not in target, "unsafe_archive_link")
     resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
     _require(resolved not in (".", "..") and not resolved.startswith("../"), "unsafe_archive_link")
     return resolved
-
-
-def _selection(member, kind):
-    name = member.name.removeprefix("./").rstrip("/")
-    if kind == "python":
-        return name[7:] if name.startswith("python/") else None
-    if kind == "tmux":
-        return "bin/tmux" if name == "tmux" else None
-    if kind == "git":
-        if name in ("bin/git", "libexec/git-core/git", "libexec/git-core/git-remote-http", "libexec/git-core/NOTICE", "COPYING", "LICENSE", "LICENSE.txt") or name.startswith("share/git-core/templates/"):
-            return name
-        if name.startswith("libexec/git-core/") and member.issym() and member.linkname in ("git", "../../bin/git", "git-remote-http"):
-            return name
-    return None
-
-
-def _inventory(archive, descriptor):
-    members = archive.getmembers(); records = []; names = set(); links = {}
-    _require(len(members) <= descriptor["members"] + 1, "archive_member_drift")
-    for member in members:
-        name = member.name.removeprefix("./").rstrip("/")
-        if name in ("", "."):
-            _require(member.isdir(), "unsafe_archive_name"); continue
-        _safe_name(name)
-        _require(name not in names and not member.mode & 0o7000, "archive_member_drift")
-        names.add(name)
-        kind = "directory" if member.isdir() else "file" if member.isfile() else "symlink" if member.issym() else None
-        _require(kind is not None, "unsafe_archive_type")
-        if member.issym():
-            links[name] = _safe_link(name, member.linkname)
-        records.append({"name": name, "type": kind, "mode": member.mode, "bytes": member.size, "link": member.linkname})
-    _require(len(records) == descriptor["members"] and sum(row["bytes"] for row in records) == descriptor["unpacked_bytes"]
-             and _sha(_canonical(sorted(records, key=lambda row: row["name"]))) == descriptor["members_sha256"], "archive_member_drift")
-    for name in names:
-        _require(not any(str(parent) in links for parent in PurePosixPath(name).parents), "archive_symlink_parent")
-    for name in links:
-        seen = {name}; target = links[name]
-        while target in links:
-            _require(target not in seen, "archive_link_cycle"); seen.add(target); target = links[target]
-        _require(target in names, "archive_link_missing")
-    return members
-
-
-def _extract(path, destination, kind, descriptor, uid):
-    _require(_sha(_read(path, uid, descriptor["bytes"])) == descriptor["sha256"], "artifact_mismatch")
-    _directory(destination, uid, 0o755, create=True)
-    with tarfile.open(path, mode="r:gz") as archive:
-        members = _inventory(archive, descriptor)
-        selected = {_selection(member, kind): member for member in members if _selection(member, kind)}
-        for name, member in selected.items():
-            if not member.issym():
-                continue
-            seen = {name}; target = _safe_link(name, member.linkname)
-            while target in selected and selected[target].issym():
-                _require(target not in seen, "archive_link_cycle")
-                seen.add(target); target = _safe_link(target, selected[target].linkname)
-            _require(target in selected, "selected_archive_link_missing")
-        links = []
-        for member in members:
-            relative = _selection(member, kind)
-            if not relative:
-                continue
-            _safe_name(relative); target = destination / relative
-            for parent in reversed(target.relative_to(destination).parents):
-                if str(parent) != ".":
-                    _directory(destination / parent, uid, 0o755, create=True)
-            if member.isdir():
-                _directory(target, uid, 0o755, create=True)
-            elif member.issym():
-                _safe_link(relative, member.linkname); links.append((target, member.linkname))
-            else:
-                mode = 0o755 if member.mode & 0o111 else 0o644
-                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
-                with archive.extractfile(member) as source, os.fdopen(fd, "wb") as output:
-                    shutil.copyfileobj(source, output, 1024 * 1024)
-                    output.flush(); os.fsync(output.fileno())
-                os.chmod(target, mode, follow_symlinks=False)
-        for path, link in links:
-            path.symlink_to(link)
-    _require(_tree(destination, uid, staged=True) == descriptor["tree_sha256"], "extracted_tree_mismatch")
 
 
 def _verify_profile(profile, *, staged=False):
@@ -526,21 +459,6 @@ def _verify_profile(profile, *, staged=False):
         info = (profile.bin / name).lstat()
         _require(stat.S_ISLNK(info.st_mode) and info.st_uid == profile.uid and os.readlink(profile.bin / name) == target, "runtime_alias_changed")
     return receipt
-
-
-def _seal_profile(profile):
-    # Only the complete, exact staged profile can cross to immutable modes.
-    _verify_profile(profile, staged=True)
-    # Darwin requires write permission on a directory moved across parents.
-    # Keep only this private container0700; every component directory is0555.
-    for directory, directories, files in os.walk(profile.root, topdown=False, followlinks=False):
-        for name in files:
-            path = Path(directory) / name; info = path.lstat()
-            if not stat.S_ISLNK(info.st_mode):
-                os.chmod(path, 0o555 if info.st_mode & 0o111 else 0o444, follow_symlinks=False)
-        path = Path(directory)
-        os.chmod(path, 0o700 if path == profile.root else 0o555, follow_symlinks=False)
-    _verify_profile(profile)
 
 
 def admit_profile(*, expected_uid=None, expected_account=None):
@@ -564,313 +482,7 @@ def environment(profile):
             "SSL_CERT_FILE": str(profile.ca_bundle), "PIP_CONFIG_FILE": "/dev/null", "PIP_NO_INPUT": "1", "PLANE_EMIT_DISABLED": "1"}
 
 
-def git_argv(profile, *arguments):
-    _verify_profile(profile)
-    return [str(profile.git), *arguments]
-
-
-def _attempt(base, identity):
-    value = _load(base / "attempt.json", identity.uid)
-    _require(type(value) is dict and set(value) == {"schema_version", "binding", "request_id", "stage_device", "stage_inode", "phase", "files"}
-             and type(value["schema_version"]) is int and value["schema_version"] == 1 and value["binding"] == _binding(identity) and _uuid(value["request_id"])
-             and value["phase"] in ("bootstrap", "preparing", "ready", "failed") and type(value["files"]) is dict, "attempt_changed")
-    _require(all(type(value[key]) is int and value[key] > 0 for key in ("stage_device", "stage_inode")), "attempt_changed")
-    for name, inode in value["files"].items():
-        _require(name in {"python.tar.gz", "git.tar.gz", "tmux.tar.gz", "jq.bin"} and type(inode) is list and len(inode) == 2
-                 and all(type(part) is int and part > 0 for part in inode), "attempt_changed")
-    return value
-
-
-def status(value):
-    validate_request("status", value)
-    identity = _identity(expected_uid=value["expected_uid"], expected_account=value["expected_account"])
-    profile = _profile(identity); base = _base(identity)
-    if profile.root.exists() or profile.root.is_symlink():
-        receipt = _verify_profile(profile)
-        return {"state": "ready", "profile_id": PROFILE_ID, "policy_sha256": _policy(), "request_id": value["request_id"],
-                "completion_request_id": receipt["request_id"], "never_replay": True}
-    if not base.exists():
-        return {"state": "absent", "request_id": value["request_id"], "never_replay": True}
-    _directory(base, identity.uid, 0o700)
-    if (base / "attempt.json").exists() or (base / "attempt.json").is_symlink():
-        attempt = _attempt(base, identity)
-        return {"state": "unknown", "request_id": attempt["request_id"], "phase": attempt["phase"], "never_replay": True}
-    return {"state": "absent", "request_id": value["request_id"], "never_replay": True}
-
-
-def _lock(base, uid):
-    path = base / "transition.lock"
-    inherited = os.fstat(_INHERITED_LOCK_FD) if _INHERITED_LOCK_FD is not None else None
-    if inherited is not None:
-        actual = path.lstat()
-        _require((inherited.st_dev, inherited.st_ino) == (actual.st_dev, actual.st_ino), "lock_identity_changed")
-        fd = os.dup(_INHERITED_LOCK_FD)
-    else:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        info = os.fstat(fd)
-        _require(stat.S_ISREG(info.st_mode) and info.st_uid == uid and info.st_nlink == 1
-                 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == 0, "unsafe_lock")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except BaseException:
-        os.close(fd); raise
-
-
-def _stage(base, attempt, uid):
-    stage = base / ("stage-" + attempt["request_id"])
-    info = _directory(stage, uid, 0o700)
-    _require((info.st_dev, info.st_ino) == (attempt["stage_device"], attempt["stage_inode"]), "stage_identity_changed")
-    return stage
-
-
-class _HTTPSRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, request, response, code, message, headers, newurl):
-        _require(urllib.parse.urlsplit(newurl).scheme == "https", "insecure_artifact_redirect")
-        return super().redirect_request(request, response, code, message, headers, newurl)
-
-
-def _download(kind, stage, attempt, base, identity, deadline):
-    descriptor = _DESCRIPTOR["artifacts"][kind]
-    path = stage / (kind + (".bin" if kind == "jq" else ".tar.gz"))
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    info = os.fstat(fd)
-    attempt["files"][path.name] = [info.st_dev, info.st_ino]
-    _save(base / "attempt.json", attempt, identity.uid)
-    try:
-        context = ssl.create_default_context(cafile=stage / "profile/python" / CA_MEMBER)
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context), _HTTPSRedirect())
-        remaining = deadline - time.monotonic(); _require(remaining > 0, "preparation_deadline")
-        with os.fdopen(fd, "wb") as output, opener.open(descriptor["url"], timeout=min(30, remaining)) as response:
-            total = 0; digest = hashlib.sha256()
-            while True:
-                _require(time.monotonic() < deadline, "preparation_deadline")
-                chunk = response.read1(min(65536, descriptor["bytes"] + 1 - total))
-                if not chunk:
-                    break
-                total += len(chunk); _require(total <= descriptor["bytes"], "artifact_oversize")
-                output.write(chunk); digest.update(chunk)
-            output.flush(); os.fsync(output.fileno())
-        _require(total == descriptor["bytes"] and digest.hexdigest() == descriptor["sha256"], "artifact_mismatch")
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        raise
-    return path
-
-
-def _publish(stage, destination):
-    # Darwin renamex_np(RENAME_EXCL): never replace even an empty foreign dir.
-    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-    rename = libc.renamex_np
-    rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-    rename.restype = ctypes.c_int
-    if rename(os.fsencode(stage), os.fsencode(destination), 0x4) != 0:
-        raise OSError(ctypes.get_errno(), "exclusive runtime publication failed")
-
-
-def prepare(value, *, bootstrap=False):
-    validate_request("prepare", value)
-    identity = _identity(expected_uid=value["expected_uid"], expected_account=value["expected_account"])
-    profile = _profile(identity); base = _base(identity)
-    if profile.root.exists() or profile.root.is_symlink():
-        return status(value)
-    _require(bootstrap, "bootstrap_entry_required")
-    _parents(base, identity.uid)
-    _directory(base, identity.uid, 0o700)
-    lock = _lock(base, identity.uid)
-    try:
-        attempt = _attempt(base, identity)
-        _require(attempt["request_id"] == value["request_id"] and attempt["phase"] == "bootstrap", "original_attempt_required")
-        stage = _stage(base, attempt, identity.uid); work = stage / "profile"
-        _directory(work, identity.uid, 0o700)
-        _require(_tree(work / "python", identity.uid, staged=True) == _DESCRIPTOR["artifacts"]["python"]["tree_sha256"], "bootstrap_python_changed")
-        admitted = True
-        attempt["phase"] = "preparing"; _save(base / "attempt.json", attempt, identity.uid)
-        deadline = time.monotonic() + BUDGET
-        for kind in ("git", "tmux", "jq"):
-            archive = _download(kind, stage, attempt, base, identity, deadline)
-            if kind == "jq":
-                destination = work / "jq"; _directory(destination, identity.uid, 0o755, create=True)
-                _directory(destination / "bin", identity.uid, 0o755, create=True)
-                raw = _read(archive, identity.uid, _DESCRIPTOR["artifacts"][kind]["bytes"])
-                _require(_sha(raw) == _DESCRIPTOR["artifacts"][kind]["sha256"], "artifact_mismatch")
-                fd = os.open(destination / "bin/jq", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o755)
-                os.fchmod(fd, 0o755)
-                with os.fdopen(fd, "wb") as out:
-                    out.write(raw); out.flush(); os.fsync(out.fileno())
-            else:
-                _extract(archive, work / kind, kind, _DESCRIPTOR["artifacts"][kind], identity.uid)
-        _directory(work / "bin", identity.uid, 0o755, create=True)
-        for name, target in ALIASES.items():
-            (work / "bin" / name).symlink_to(target)
-        ca = _read(work / "python" / CA_MEMBER, identity.uid, 1024 * 1024, 0o644)
-        _require(_sha(ca) == _DESCRIPTOR["ca_sha256"], "runtime_ca_changed")
-        fd = os.open(work / "ca-bundle.pem", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-        os.fchmod(fd, 0o644)
-        with os.fdopen(fd, "wb") as out:
-            out.write(ca); out.flush(); os.fsync(out.fileno())
-        receipt = {"schema_version": 1, "binding": _binding(identity), "request_id": value["request_id"], "state": "ready"}
-        _save(work / "receipt.json", receipt, identity.uid, new=True)
-        staged_profile = RuntimeProfile(profile.uid, profile.account, profile.home, work, work / "bin", work / "python/bin/python3.12",
-                                        work / "git/bin/git", work / "git/libexec/git-core", work / "tmux/bin/tmux", work / "jq/bin/jq",
-                                        work / "ca-bundle.pem", _policy())
-        _seal_profile(staged_profile)
-        _require(time.monotonic() < deadline, "preparation_deadline")
-        _publish(work, profile.root); _sync(base)
-        attempt["phase"] = "ready"; _save(base / "attempt.json", attempt, identity.uid)
-        return status(value)
-    except Exception:
-        if locals().get("admitted") and attempt.get("phase") != "ready":
-            attempt["phase"] = "failed"; _save(base / "attempt.json", attempt, identity.uid)
-        raise
-    finally:
-        os.close(lock)  # Never LOCK_UN: inherited holders share one description.
-
-
-def _owned_partial(component, archive_path, kind, descriptor, uid):
-    _require(_sha(_read(archive_path, uid, descriptor["bytes"])) == descriptor["sha256"], "unknown_stage_content")
-    _require(stat.S_IMODE(_directory(component, uid).st_mode) in (0o755, 0o555), "unknown_stage_content")
-    with tarfile.open(archive_path, "r:gz") as archive:
-        expected = {}
-        for member in _inventory(archive, descriptor):
-            name = _selection(member, kind)
-            if not name:
-                continue
-            for parent in PurePosixPath(name).parents:
-                if str(parent) != ".":
-                    expected.setdefault(str(parent), ("directory", 0o755, None))
-            expected[name] = ("directory", 0o755, None) if member.isdir() else ("symlink", 0, member.linkname) if member.issym() else ("file", 0o755 if member.mode & 0o111 else 0o644, member)
-        for directory, directories, files in os.walk(component, followlinks=False):
-            for name in directories + files:
-                path = Path(directory) / name; relative = path.relative_to(component).as_posix(); info = path.lstat()
-                _require(relative in expected and info.st_uid == uid, "unknown_stage_content")
-                kind_expected, mode, value = expected[relative]
-                if stat.S_ISLNK(info.st_mode):
-                    _require(kind_expected == "symlink" and info.st_nlink == 1 and os.readlink(path) == value, "unknown_stage_content")
-                    if name in directories:
-                        directories.remove(name)
-                elif stat.S_ISDIR(info.st_mode):
-                    _require(kind_expected == "directory" and stat.S_IMODE(info.st_mode) in (mode, mode & ~0o222), "unknown_stage_content")
-                else:
-                    _require(kind_expected == "file" and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
-                             and stat.S_IMODE(info.st_mode) in (mode, mode & ~0o222) and info.st_size <= value.size, "unknown_stage_content")
-                    # An interrupted known write may be a prefix, never foreign data.
-                    actual = _read(path, uid, value.size, stat.S_IMODE(info.st_mode))
-                    _require(archive.extractfile(value).read(len(actual)) == actual, "unknown_stage_content")
-
-
-def discard(value):
-    validate_request("discard", value)
-    identity = _identity(expected_uid=value["expected_uid"], expected_account=value["expected_account"])
-    base = _base(identity); _parents(base, identity.uid); _directory(base, identity.uid, 0o700)
-    lock = _lock(base, identity.uid)
-    try:
-        attempt = _attempt(base, identity)
-        _require(attempt["request_id"] == value["request_id"], "original_attempt_required")
-        profile = _profile(identity)
-        if profile.root.exists() or profile.root.is_symlink():
-            _verify_profile(profile)
-        stage = _stage(base, attempt, identity.uid)
-        allowed = set(attempt["files"]) | {"profile"}
-        _require({p.name for p in stage.iterdir()} <= allowed, "unknown_stage_content")
-        for name, expected in attempt["files"].items():
-            _require(name in {"python.tar.gz", "git.tar.gz", "tmux.tar.gz", "jq.bin"}, "attempt_changed")
-            path = stage / name
-            if path.exists() or path.is_symlink():
-                info = path.lstat(); kind = name.split(".", 1)[0]
-                _require([info.st_dev, info.st_ino] == expected and stat.S_ISREG(info.st_mode) and info.st_uid == identity.uid
-                         and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
-                         and info.st_size <= _DESCRIPTOR["artifacts"][kind]["bytes"], "unknown_stage_content")
-        work = stage / "profile"
-        if work.exists() or work.is_symlink():
-            _directory(work, identity.uid, 0o700)
-            _require({p.name for p in work.iterdir()} <= set(_DESCRIPTOR["artifacts"]) | {"bin", "ca-bundle.pem", "receipt.json"}, "unknown_stage_content")
-            for kind in _DESCRIPTOR["artifacts"]:
-                path = work / kind
-                if not (path.exists() or path.is_symlink()):
-                    continue
-                if kind == "jq":
-                    _require(stat.S_IMODE(_directory(path, identity.uid).st_mode) in (0o755, 0o555), "unknown_stage_content")
-                    _require({p.name for p in path.iterdir()} <= {"bin"}, "unknown_stage_content")
-                    binary_dir = path / "bin"
-                    if binary_dir.exists() or binary_dir.is_symlink():
-                        _require(stat.S_IMODE(_directory(binary_dir, identity.uid).st_mode) in (0o755, 0o555), "unknown_stage_content")
-                        _require({p.name for p in binary_dir.iterdir()} <= {"jq"}, "unknown_stage_content")
-                        binary = binary_dir / "jq"
-                        if binary.exists() or binary.is_symlink():
-                            expected_raw = _read(stage / "jq.bin", identity.uid, _DESCRIPTOR["artifacts"][kind]["bytes"])
-                            mode = stat.S_IMODE(binary.lstat().st_mode)
-                            _require(mode in (0o755, 0o555) and _sha(expected_raw) == _DESCRIPTOR["artifacts"][kind]["sha256"]
-                                     and expected_raw.startswith(_read(binary, identity.uid, len(expected_raw), mode)), "unknown_stage_content")
-                else:
-                    _owned_partial(path, stage / (kind + ".tar.gz"), kind, _DESCRIPTOR["artifacts"][kind], identity.uid)
-            aliases = work / "bin"
-            if aliases.exists() or aliases.is_symlink():
-                _require(stat.S_IMODE(_directory(aliases, identity.uid).st_mode) in (0o755, 0o555), "unknown_stage_content")
-                for path in aliases.iterdir():
-                    info = path.lstat()
-                    _require(path.name in ALIASES and stat.S_ISLNK(info.st_mode) and info.st_uid == identity.uid
-                             and info.st_nlink == 1 and os.readlink(path) == ALIASES[path.name], "unknown_stage_content")
-            ca = work / "ca-bundle.pem"
-            if ca.exists() or ca.is_symlink():
-                source_ca = work / "python" / CA_MEMBER
-                source_mode = stat.S_IMODE(source_ca.lstat().st_mode); mode = stat.S_IMODE(ca.lstat().st_mode)
-                _require(source_mode in (0o644, 0o444) and mode in (0o644, 0o444), "unknown_stage_content")
-                expected_ca = _read(source_ca, identity.uid, 1024 * 1024, source_mode)
-                _require(_sha(expected_ca) == _DESCRIPTOR["ca_sha256"] and expected_ca.startswith(_read(ca, identity.uid, len(expected_ca), mode)), "unknown_stage_content")
-            receipt = work / "receipt.json"
-            if receipt.exists() or receipt.is_symlink():
-                expected_receipt = _canonical({"schema_version": 1, "binding": _binding(identity), "request_id": value["request_id"], "state": "ready"})
-                mode = stat.S_IMODE(receipt.lstat().st_mode)
-                _require(mode in (0o600, 0o444) and expected_receipt.startswith(_read(receipt, identity.uid, mode=mode)), "unknown_stage_content")
-        # Lock acquisition proves no surviving admitted descendant owns the stage.
-        # Only exact inode-bound known content was admitted above; no generic reset.
-        if work.exists():
-            # All names, inodes, bytes and modes were admitted above. Restore
-            # directory write permission only in this owned disposable stage.
-            for directory, directories, files in os.walk(work, followlinks=False):
-                os.chmod(directory, 0o700 if Path(directory) == work else 0o755, follow_symlinks=False)
-            # Keep the running interpreter until all other work is removed.
-            # Interruption during its final removal still requires preservation.
-            for path in work.iterdir():
-                if path.name != "python":
-                    shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink()
-            if (work / "python").exists():
-                shutil.rmtree(work / "python")
-            work.rmdir()
-        for path in stage.iterdir():
-            path.unlink()
-        stage.rmdir(); (base / "attempt.json").unlink(); _sync(base)
-        return {"state": "discarded", "request_id": value["request_id"], "installed_profile_unchanged": True}
-    finally:
-        os.close(lock)
-
-
-def main():
-    global _INHERITED_LOCK_FD
-    try:
-        _require(len(sys.argv) in (3, 4), "invalid_request")
-        operation = sys.argv[1]; raw = sys.argv[2].encode("ascii")
-        _require(len(raw) <= 2048, "invalid_request")
-        value = json.loads(raw, object_pairs_hook=_unique)
-        validate_request(operation, value)
-        _require(raw == _canonical(value), "invalid_request")
-        if operation != "status":
-            _INHERITED_LOCK_FD = 9
-        result = status(value) if operation == "status" else discard(value) if operation == "discard" else prepare(value, bootstrap=len(sys.argv) == 4 and sys.argv[3] == "bootstrap")
-        sys.stdout.write(_canonical({"schema_version": 1, "result": result}).decode("ascii") + "\n")
-        return 0
-    except Exception as exc:
-        code = exc.code if isinstance(exc, RuntimeRefusal) else "runtime_unavailable"
-        sys.stdout.write(_canonical({"schema_version": 1, "state": "unavailable", "code": code}).decode("ascii") + "\n")
-        return 6
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+# END DARWIN RUNTIME ADMISSION
 # END CANONICAL DARWIN RUNTIME PYTHON
 '''
 
@@ -929,11 +541,14 @@ def independent_python():
         if python != profile.python or sys.prefix != sys.base_prefix:
             raise Refusal("prerequisite_unusable", "unavailable", exit_code=6)
         return python
+    folder = Path("/usr/bin").lstat()
     if (sys.implementation.name != "cpython" or sys.version_info < (3, 10)
-            or sys.prefix != sys.base_prefix or python.parent != Path("/usr/bin")):
+            or sys.prefix != sys.base_prefix or python.parent != Path("/usr/bin")
+            or not stat.S_ISDIR(folder.st_mode) or folder.st_uid != 0 or folder.st_mode & 0o022):
         raise Refusal("prerequisite_unusable", "unavailable", exit_code=6)
     info = python.stat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022
+            or not os.access(python, os.X_OK)):
         raise Refusal("prerequisite_unusable", "unavailable", exit_code=6)
     return python
 
@@ -953,6 +568,33 @@ def fixed_environment(home):
             "GIT_ASKPASS": "/bin/false", "SSH_ASKPASS": "/bin/false", "PIP_CONFIG_FILE": os.devnull,
             "PIP_NO_INPUT": "1", "PLANE_EMIT_DISABLED": "1",
             "TMPDIR": str(home / ".local/share/claudlobby-browser/staging")}
+
+
+def update_environment(home):
+    # The update actions' own map, built fresh: the guide script's pinned
+    # selectors (owner-guide-v1.sh selectors), so a render reads this
+    # computer's own settings, and on Linux the two variables the account's
+    # user manager needs, as the guide's profile sets them. Never PLANE_EMIT_DISABLED: a team
+    # continued here runs its identity scan in this process.
+    family = home / ".local/share/claudlobby-browser"
+    selected = {"CLAUDLOBBY_ROOT": str(family / "data"), "CLAUDLOBBY_INSTALLATION": str(family / "install"),
+                "CLAUDLOBBY_HOST_SYSTEM_YAML": str(family / "host-policy/system.yaml"),
+                "CLAUDE_CONFIG_DIR": str(family / "provider-profile"), "TMPDIR": str(family / "staging"),
+                "LANG": "C.UTF-8", "TERM": "dumb", "PYTHONNOUSERSITE": "1"}
+    if platform.system() == "Darwin":
+        profile = admitted_darwin_profile()
+        if profile.home != home:
+            raise Refusal("account_changed")
+        managed = _darwin_runtime().environment(profile)
+        return {**{key: item for key, item in managed.items() if key != "PLANE_EMIT_DISABLED"}, **selected}
+    uid = str(os.getuid())
+    return {"PATH": "/usr/bin:/bin", "HOME": str(home), **selected,
+            "XDG_CONFIG_HOME": str(home / ".config"), "XDG_CACHE_HOME": str(home / ".cache"),
+            "XDG_RUNTIME_DIR": "/run/user/" + uid, "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/" + uid + "/bus",
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_ASKPASS": "/bin/false", "SSH_ASKPASS": "/bin/false", "PIP_CONFIG_FILE": os.devnull,
+            "PIP_NO_INPUT": "1"}
 
 
 class Runner:
@@ -1113,10 +755,20 @@ def binding(install, data, revision, python):
             "interpreter_sha256": digest(python)}
 
 
+def bound(expected):
+    return hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()
+
+
 def receipt(path, expected):
     value = read_json(path)
+    # The managed Mac Python keeps its byte pin. The Ubuntu /usr/bin Python is
+    # admitted by independent_python instead: security updates replace it, so
+    # its bytes are not compared and inspect keeps the digest recorded here.
+    pinned = {key: item for key, item in expected.items()
+              if key != "interpreter_sha256" or platform.system() == "Darwin"}
     if (not isinstance(value, dict) or set(value) != FIELDS
-            or any(value.get(key) != item for key, item in expected.items())
+            or not isinstance(value["interpreter_sha256"], str) or not DIGEST.fullmatch(value["interpreter_sha256"])
+            or any(value.get(key) != item for key, item in pinned.items())
             or type(value["schema"]) is not int or type(value["complete"]) is not bool
             or type(value["environment_owned"]) is not bool
             or value["revision"] not in (None, expected["ref"])
@@ -1171,7 +823,23 @@ def data_check(data, *, complete=False):
         raise Refusal("identity_changed", next_step="inspect")
 
 
-def paths(home, create=False):
+def in_use_data_check(data):
+    # Setup has gone on since preparation. The skeleton that completion created
+    # must still be there, checked by metadata alone; what setup and the app
+    # have added under it is theirs and is neither read nor locked here.
+    state = data / "state"
+    if not directory(data, private=True) or not directory(state, private=True):
+        raise Refusal("identity_changed", next_step="inspect")
+    try:
+        info = (state / "runtime-use.lock").lstat()
+    except FileNotFoundError:
+        raise Refusal("identity_changed", next_step="inspect") from None
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size):
+        raise Refusal("existing_installation", next_step="inspect")
+
+
+def paths(home, create=False, in_use=False):
     for path in (home / ".local", home / ".local/share"):
         if not directory(path, create=create):
             return None
@@ -1184,12 +852,25 @@ def paths(home, create=False):
         if profile.root != family / "runtime/profile":
             raise Refusal("identity_changed", next_step="inspect")
         allowed.add("runtime")
-    if {p.name for p in family.iterdir()} - allowed:
+    later = {p.name for p in family.iterdir()} - allowed
+    # Status alone may see the fixed directories setup adds beside a completed
+    # preparation. Prepare refuses them, and any other name refuses for both.
+    if later - (SETUP_FAMILY if in_use else set()):
         raise Refusal("existing_installation", next_step="inspect")
+    for name in later:
+        directory(family / name, private=True)
     install, data, staging = (family / name for name in ("install", "data", "staging"))
     for path in (install, data, staging):
         directory(path, private=True, create=create)
     return install, data, staging
+
+
+def setup_started(family, data, staging):
+    # Names only: anything beyond the inactive skeleton a preparation leaves.
+    # The state directory is admitted before it is listed, so a link is never followed.
+    state = data / "state"
+    return bool(names(family) & SETUP_FAMILY or names(staging) or names(data) - {"state"}
+                or directory(state, private=True) and names(state) - {"runtime-use.lock"})
 
 
 def contents_check(install, data, staging):
@@ -1283,20 +964,29 @@ def environment_check(environment, python, runner, env):
         raise Refusal("existing_installation", next_step="inspect")
 
 
-def inspect(install, data, expected, python, runner, env):
+def inspect(install, data, expected, python, runner, env, in_use=False):
     allowed = {"preparation.lock", "preparation.json", "installation.json", "src", "env", "bin", "cache"}
     if {p.name for p in install.iterdir()} - allowed:
         raise Refusal("existing_installation", next_step="inspect")
     record = install / "preparation.json"
     if not record.exists() and not record.is_symlink():
-        if {p.name for p in install.iterdir()} - {"preparation.lock"} or names(data):
+        if in_use or {p.name for p in install.iterdir()} - {"preparation.lock"} or names(data):
             raise Refusal("existing_installation", next_step="inspect")
         return None
     state = receipt(record, expected)
-    # Completion requires the original inactive launcher skeleton. Inspect it
-    # before prepare can create any missing data/staging paths. Never repair
-    # completed state loss or reinterpret it as a fresh/incomplete preparation.
-    data_check(data, complete=state["complete"])
+    # The binding reported and resumed is the one recorded at preparation.
+    expected["interpreter_sha256"] = state["interpreter_sha256"]
+    if in_use:
+        # Later state beside anything but this exact completed preparation is
+        # unknown: never adopted, and never read as fresh or incomplete.
+        if not state["complete"]:
+            raise Refusal("existing_installation", next_step="inspect")
+        in_use_data_check(data)
+    else:
+        # Completion requires the original inactive launcher skeleton. Inspect it
+        # before prepare can create any missing data/staging paths. Never repair
+        # completed state loss or reinterpret it as a fresh/incomplete preparation.
+        data_check(data, complete=state["complete"])
     identity = read_json(install / "installation.json", 4096)
     if identity != {"schema": 1, "data_root": str(data)} or type(identity.get("schema")) is not int:
         raise Refusal("identity_changed", next_step="inspect")
@@ -1346,8 +1036,22 @@ def inspect(install, data, expected, python, runner, env):
     entries = install / "bin"
     if entries.exists() or entries.is_symlink():
         directory(entries, private=True)
-        if {p.name for p in entries.iterdir()} - {"claudlobby", "claudlobby-update"}:
+        # Status alone may see the one job definition this installation's updater
+        # keeps beside its entry (update_job.py, update_job_label), checked by
+        # metadata only: never read or adopted. Prepare refuses it, and any other name.
+        job = ("com.claudlobby.update." + hashlib.sha256(str(install).encode()).hexdigest()[:16]
+               + (".plist" if platform.system() == "Darwin" else ".service"))
+        later = {p.name for p in entries.iterdir()} - {"claudlobby", "claudlobby-update"}
+        if later - ({job} if in_use else set()):
             raise Refusal("existing_installation", next_step="inspect")
+        if later:
+            try:
+                info = (entries / job).lstat()
+            except FileNotFoundError:
+                raise Refusal("identity_changed", next_step="inspect") from None
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o644 or info.st_size > 8192):
+                raise Refusal("existing_installation", next_step="inspect")
         for name, module in (("claudlobby", "installation.py"), ("claudlobby-update", "git_update.py")):
             path = entries / name
             if path.exists() or path.is_symlink():
@@ -1403,7 +1107,7 @@ def stage_and_prepare(install, data, staging, expected, python, runner, env, loc
 def execute(action, value, deadline):
     descriptors = []
     runner = Runner(deadline)
-    uid, revision, binding_hash = None, None, None
+    uid, revision, binding_hash, expected = None, None, None, None
     try:
         home = account_profile(value["expected_uid"])
         uid, revision = value["expected_uid"], value["source_revision"]
@@ -1414,11 +1118,12 @@ def execute(action, value, deadline):
         foreign = shutil.which("claudlobby", path=os.environ.get("PATH", ""))
         if foreign and Path(foreign) != install / "bin/claudlobby":
             raise Refusal("existing_installation")
-        current = paths(home)
+        current = paths(home, in_use=action == "status")
         expected = binding(install, data, revision, python)
-        binding_hash = hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()
+        binding_hash = bound(expected)
         if action == "status" and (current is None or not (install / "preparation.lock").exists()):
-            if current is not None and (names(install) or names(data) or names(staging)):
+            if current is not None and (names(install) or names(data) or names(staging)
+                                        or names(family) & SETUP_FAMILY):
                 raise Refusal("existing_installation", next_step="inspect")
             return "absent", "none", "inspect", False, revision, uid, binding_hash
         if action == "prepare":
@@ -1435,14 +1140,20 @@ def execute(action, value, deadline):
         runner.descriptors = tuple(descriptors)
         # Only lock-path ancestors precede this flock. Staging/data creation
         # and all network or child work stay under its exclusive ownership.
-        paths(home)
-        contents_check(install, data, staging)
-        state = inspect(install, data, expected, python, runner, env)
+        paths(home, in_use=action == "status")
+        # Read-only status tells a completed preparation that setup has since
+        # used from unknown state. Prepare keeps requiring the untouched skeleton.
+        in_use = action == "status" and setup_started(family, data, staging)
+        if not in_use:
+            contents_check(install, data, staging)
+        state = inspect(install, data, expected, python, runner, env, in_use=in_use)
+        binding_hash = bound(expected)
         if action == "status":
             if state is None:
                 return "absent", "none", "inspect", False, revision, uid, binding_hash
             if state["complete"]:
-                return "recorded_complete", "none", "continue_onboarding", True, revision, uid, binding_hash
+                return ("recorded_in_use" if in_use else "recorded_complete", "none", "continue_onboarding", True,
+                        revision, uid, binding_hash)
             return "incomplete", "preparation_incomplete", "resume_same", False, revision, uid, binding_hash
         if state is None or not state["complete"]:
             directory(data, private=True, create=True)
@@ -1451,18 +1162,527 @@ def execute(action, value, deadline):
             observed = inspect(install, data, expected, python, runner, env)
             if observed is None or not observed["complete"]:
                 raise unavailable("preparation_incomplete")
+            binding_hash = bound(expected)
         return "prepared", "none", "continue_onboarding", True, revision, uid, binding_hash
     except Refusal as error:
-        error.identity = (revision, uid, binding_hash)
+        error.identity = (revision, uid, binding_hash if expected is None else bound(expected))
         raise
     except Exception:
         error = Refusal("preparation_refused", "refused", "inspect")
-        error.identity = (revision, uid, binding_hash)
+        error.identity = (revision, uid, binding_hash if expected is None else bound(expected))
         raise error from None
     finally:
         runner.close()
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+BINDING_KEYS = ("schema", "purpose", "installation", "data_root", "remote", "ref", "interpreter",
+                "interpreter_sha256")
+PHASES = {"prepare", "quiesce", "git", "environment", "publish", "migrate", "commit", "restore", "done"}
+# The updater's own stages, a stage error names one of them; the stages that work
+# through units and the field a finished unit sets; how a job run ended.
+STAGES = {"authorize", "retire-render", "render", "prepare", "conversion-check", "quiesce", "quiet", "publish",
+          "restore"}
+UNIT_FIELDS = {"quiesce": "stop", "restore": "restore"}
+RUNNERS = {"pending", "entered", "finished"}
+OUTCOMES = {"finished", "unfinished", "refused"}
+
+
+def installed(home, python, runner, env):
+    # A completed preparation as setup and the updater have left it. Its receipt
+    # is checked against itself, never against a revision a client sent; the
+    # installed revision is whatever the updater moved the checkout to. Holds
+    # the preparation lock shared for these reads only.
+    family = home / ".local/share/claudlobby-browser"
+    install, data, staging = (family / name for name in ("install", "data", "staging"))
+    current = paths(home, in_use=True)
+    if current is None or not (install / "preparation.lock").exists():
+        if current is not None and (names(install) or names(data) or names(staging) or names(family) & SETUP_FAMILY):
+            raise Refusal("existing_installation", next_step="inspect")
+        return None
+    lock = lock_open(install / "preparation.lock", False, False)
+    try:
+        paths(home, in_use=True)
+        record = install / "preparation.json"
+        if not record.exists() and not record.is_symlink():
+            raise Refusal("not_prepared")
+        value = read_json(record)
+        if not isinstance(value, dict) or not isinstance(value.get("ref"), str) or not SHA.fullmatch(value["ref"]):
+            raise Refusal("identity_changed", next_step="inspect")
+        state = receipt(record, binding(install, data, value["ref"], python))
+        if not state["complete"]:
+            raise Refusal("not_prepared")
+        touched = setup_started(family, data, staging)
+        if touched:
+            in_use_data_check(data)
+        else:
+            data_check(data, complete=True)
+        if read_json(install / "installation.json", 4096) != {"schema": 1, "data_root": str(data)}:
+            raise Refusal("identity_changed", next_step="inspect")
+        source = install / "src"
+        directory(source, private=True)
+        if not directory(source / ".git", private=True):
+            raise Refusal("source_mismatch", next_step="inspect")
+        git_available()
+        head = git(runner, env, source, "rev-parse", "--verify", "HEAD^{commit}").stdout.decode().strip()
+        if not SHA.fullmatch(head):
+            raise Refusal("source_mismatch", next_step="inspect")
+        directory(install / "bin", private=True)
+        for name in ("claudlobby", "claudlobby-update"):
+            if not plain_file(install / "bin" / name, 1024 * 1024, 0o755).startswith(("#!" + str(python) + "\n").encode()):
+                raise Refusal("identity_changed", next_step="inspect")
+        setup = ("started" if os.path.lexists(data / "state/config.json") else "in_use" if touched else "untouched")
+        return {"receipt": state, "head": head, "setup": setup, "install": install, "data": data, "source": source,
+                "binding": bound({key: state[key] for key in BINDING_KEYS}),
+                "interpreter": "same" if digest(python) == state["interpreter_sha256"] else "changed"}
+    finally:
+        os.close(lock)
+
+
+def progress(record, dispatch, now):
+    # Where the update is, from the record alone and this computer's clock; nothing
+    # looks at the native job. A key the updater did not write, or wrote in another
+    # shape, reads as null or false and refuses nothing.
+    error = record.get("stage_error")
+    named = error.get("stage") if isinstance(error, dict) else None
+    stage = None if not error else named if isinstance(named, str) and named in STAGES else "other"
+    units, field, consumers = None, UNIT_FIELDS.get(record["phase"]), record.get("consumers")
+    if field and isinstance(consumers, dict) and consumers:
+        # A unit with a restore error has not finished: the updater's own count.
+        units = {"done": sum(isinstance(row, dict) and row.get(field) == "done" and "restore_error" not in row
+                             for row in consumers.values()), "total": len(consumers)}
+    state = dispatch.get("state") if isinstance(dispatch, dict) else None
+    attempt = dispatch.get("attempt") if isinstance(dispatch, dict) else None
+    clock = record.get("job_clock") if isinstance(record.get("job_clock"), dict) else {}
+    def age(key):
+        at = clock.get(key)
+        return max(0, int(now) - at) if type(at) is int else None
+    outcome = record.get("job_outcome")
+    # Only the outcome of the current dispatch speaks for it; with no dispatch, none does.
+    outcome = (outcome["result"] if isinstance(outcome, dict) and isinstance(outcome.get("result"), str)
+               and outcome["result"] in OUTCOMES and type(attempt) is int and outcome.get("attempt") == attempt
+               else None)
+    waits = record.get("runtime_waits")
+    latest = waits[-1] if isinstance(waits, list) and waits else None
+    errors = record.get("health_errors") or {}
+    return {"stage": stage, "units": units, "runner": state if isinstance(state, str) and state in RUNNERS else "none",
+            "pending_seconds": age("pending_at"), "entered_seconds": age("entered_at"), "outcome": outcome,
+            "waiting": isinstance(record.get("runtime_wait"), dict),
+            "runtime_busy": isinstance(latest, dict) and latest.get("outcome") == "refused",
+            "unhealthy_units": len(errors)}
+
+
+def summary(record, now=None):
+    # The update record as `host update status --json` prints it, in the names a client reads.
+    if record is None:
+        return None
+    if (not isinstance(record, dict) or not isinstance(record.get("request_id"), str)
+            or not UUID.fullmatch(record["request_id"]) or record.get("phase") not in PHASES
+            or not isinstance(record.get("target"), str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record["target"])
+            or type(record.get("maintenance")) is not bool or not isinstance(record.get("health_errors") or {}, dict)):
+        raise Refusal("unavailable", "unavailable", "inspect", 6)
+    scope, dispatch = record.get("initialization_scope"), record.get("job_dispatch")
+    kind = ("addition" if record.get("addition_scope") is not None else "update" if not isinstance(scope, dict)
+            else "first_team" if scope.get("manifests") else "start")
+    errors = record.get("health_errors") or {}
+    found = progress(record, dispatch, time.time() if now is None else now)
+    # Stopped, by the record alone: a job that ended or was refused before the
+    # update was done, a stage error, or done with health errors.
+    failed = bool(record.get("stage_error") or record["phase"] == "done" and errors
+                  or isinstance(dispatch, dict) and dispatch.get("state") == "finished" and record["phase"] != "done"
+                  or found["outcome"] in {"unfinished", "refused"} and record["phase"] != "done")
+    return {"request_id": record["request_id"], "kind": kind, "phase": record["phase"], "target": record["target"],
+            "maintenance": record["maintenance"], "dispatched": dispatch is not None, "failed": failed,
+            "health_errors": sorted(errors), **found}
+
+
+def unfinished(update):
+    # Core's own rule: not done, or done with health errors.
+    return update is not None and (update["phase"] != "done" or bool(update["health_errors"]))
+
+
+def undispatched_team(update):
+    # A Preview, a prepared first team or a prepared addition: only a Launch dispatches it.
+    return update["kind"] in {"first_team", "addition"} and not update["dispatched"]
+
+
+def update_refusal(update, head, shown, target, started):
+    if head != shown:
+        return "installed_changed"
+    if unfinished(update):
+        # The same target in flight is asked for again: apply attaches or continues.
+        return "update_in_progress" if undispatched_team(update) or update["target"] != target else None
+    if head == target:
+        return "already_current"
+    return None if started else "needs_reset"
+
+
+def continue_refusal(update, request_id):
+    if update is None or update["request_id"] != request_id:
+        return "no_such_request"
+    if not unfinished(update):
+        return "nothing_to_continue"
+    return "not_continuable" if undispatched_team(update) else None
+
+
+def launch(runner, env, python, found, *arguments, timeout=15):
+    # The stable launcher, as the guide script starts it; host update goes round maintenance.
+    return runner([python, "-I", "-S", "-B", found["install"] / "bin/claudlobby", "--root", found["data"],
+                   "host", "update", *arguments], env=env, timeout=timeout)
+
+
+def read_record(runner, env, python, found):
+    result = launch(runner, env, python, found, "status", "--json")
+    try:
+        value = json.loads(result.stdout, object_pairs_hook=unique)
+        if result.returncode or not isinstance(value, dict) or value.get("read_only") is not True:
+            raise ValueError()
+    except (ValueError, TypeError, UnicodeError):
+        raise Refusal("unavailable", "unavailable", "inspect", 6) from None
+    return summary(value.get("update"))
+
+
+def ancestor(runner, env, source, older, newer):
+    return git(runner, env, source, "merge-base", "--is-ancestor", older, newer, check=False).returncode == 0
+
+
+def dispatched(result, request_id=None, target=None):
+    try:
+        update = summary(json.loads(result.stdout, object_pairs_hook=unique)["update"])
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        update = None
+    if (result.returncode or update is None or request_id is not None and update["request_id"] != request_id
+            or target is not None and update["target"] != target):
+        return None
+    return {"state": "updating", "request_id": update["request_id"], "target": update["target"]}
+
+
+# update-status's ingress read: whether the system tailscaled already serves exactly
+# the route the root ingress card (linux-system-v1.sh, kind ingress) would publish
+# for this account, so a client can leave out a card that would change nothing.
+# That script runs as root from a root-only store and this one cannot read or
+# import it, so its predicate is copied below byte for byte; tests hold the copy to
+# the original and run both on the same cases. The read writes nothing and never
+# refuses: anything it cannot read answers unknown.
+NATIVE_VERSION = "1.104.7-tfb3b9b296-g0651cc45e"  # linux-system-v1.sh NATIVE_VERSION
+TAILSCALE_SOCKET = "/var/run/tailscale/tailscaled.sock"  # linux-system-v1.sh SOCKET
+LOCAL_API_LIMIT = 262144  # linux-system-v1.sh LIMIT
+DNS_NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,240}[a-z0-9])?\.ts\.net")  # linux-system-v1.sh binding
+# The longest the read takes, and it ends 5 s before the action's own budget.
+INGRESS_SECONDS = 4
+
+_SERVE_PREDICATE_SOURCE = r'''
+# BEGIN LINUX SYSTEM SERVE PREDICATE
+import json
+import re
+
+
+class Refusal(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+def require(ok, code):
+    if not ok:
+        raise Refusal(code)
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def unique(pairs):
+    out = {}
+    for key, value in pairs:
+        require(key not in out, "duplicate_field")
+        out[key] = value
+    return out
+
+
+def decode(raw):
+    try:
+        return json.loads(raw, object_pairs_hook=unique)
+    except (ValueError, UnicodeError):
+        raise Refusal("invalid_json") from None
+
+
+def closed_map(value, allowed):
+    require(type(value) is dict and set(value) <= allowed, "unknown_serve_schema")
+
+
+def serve_schema(value, service=False):
+    closed_map(value, {"TCP", "Web", "Tun"} if service else {"TCP", "Web", "Services", "AllowFunnel", "Foreground"})
+    for key in ("TCP", "Web", "Services", "AllowFunnel", "Foreground"):
+        if key in value:
+            require(value[key] is None or type(value[key]) is dict, "unknown_serve_schema")
+    for port, handler in (value.get("TCP") or {}).items():
+        require(re.fullmatch(r"[1-9][0-9]{0,4}", port) and int(port) < 65536, "unknown_serve_schema")
+        closed_map(handler, {"HTTPS", "HTTP", "TCPForward", "TerminateTLS", "ProxyProtocol"})
+        require(all(type(v) is bool for k, v in handler.items() if k in ("HTTPS", "HTTP"))
+                and all(type(v) is str for k, v in handler.items() if k in ("TCPForward", "TerminateTLS"))
+                and ("ProxyProtocol" not in handler or type(handler["ProxyProtocol"]) is int), "unknown_serve_schema")
+    for host, web in (value.get("Web") or {}).items():
+        require(type(host) is str and re.fullmatch(r"[A-Za-z0-9.-]+:[1-9][0-9]{0,4}", host), "unknown_serve_schema")
+        closed_map(web, {"Handlers"}); require(type(web.get("Handlers")) is dict, "unknown_serve_schema")
+        for mount, handler in web["Handlers"].items():
+            require(type(mount) is str and mount.startswith("/"), "unknown_serve_schema")
+            closed_map(handler, {"Path", "Proxy", "Text", "AcceptAppCaps", "Redirect"})
+            require(all(type(v) is str for k, v in handler.items() if k != "AcceptAppCaps")
+                    and ("AcceptAppCaps" not in handler or type(handler["AcceptAppCaps"]) is list
+                    and all(type(x) is str for x in handler["AcceptAppCaps"])), "unknown_serve_schema")
+    for config in (value.get("Services") or {}).values():
+        serve_schema(config, True)
+    for enabled in (value.get("AllowFunnel") or {}).values():
+        require(type(enabled) is bool, "unknown_serve_schema")
+    require(not value.get("Foreground"), "foreground_serve_refused")
+    if "Tun" in value:
+        require(type(value["Tun"]) is bool, "unknown_serve_schema")
+
+
+def ingress_after(old, dns, home):
+    value = {} if old is None else decode(canonical(old)); serve_schema(value)
+    target = dns + ":443"
+    require(not (value.get("AllowFunnel") or {}).get(target), "target_funnel_refused")
+    desired_tcp = {"HTTPS": True}
+    desired_web = {"Handlers": {"/": {"Proxy": "unix:" + home + "/.local/share/claudlobby-browser/data/state/owner/owner.sock"}}}
+    tcp = value.get("TCP") or {}; web = value.get("Web") or {}
+    require("443" not in tcp or tcp["443"] == desired_tcp, "occupied_443")
+    require(all(not key.endswith(":443") or key == target and entry == desired_web for key, entry in web.items()), "occupied_443")
+    value["TCP"] = dict(tcp); value["TCP"]["443"] = desired_tcp
+    value["Web"] = dict(web); value["Web"][target] = desired_web
+    return value
+# END LINUX SYSTEM SERVE PREDICATE
+'''
+
+
+def _serve_predicate():
+    """The root card's own predicate, in a namespace of its own, never installed code."""
+    namespace = {"__name__": "_claudlobby_fixed_serve_predicate"}
+    exec(compile(_SERVE_PREDICATE_SOURCE, "<linux-system serve predicate>", "exec"), namespace)
+    return namespace
+
+
+def _root_folders(path):
+    # Each folder above the socket is root's and no one else can write it.
+    for parent in reversed(path.parents):
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise OSError("untrusted socket folder")
+
+
+def _native_socket():
+    # The system daemon's socket, as the root card admits it: a root-owned socket
+    # under root-owned folders that no one else can write.
+    path = Path(TAILSCALE_SOCKET).resolve(strict=True)
+    _root_folders(path)
+    info = path.lstat()
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0:
+        raise OSError("untrusted socket")
+    return path
+
+
+def _root_daemon(connection):
+    # The peer is a daemon run by root, as the root card checks it. An ordinary
+    # account cannot read a root process's executable, so that is not checked here.
+    import socket
+    import struct
+    pid, uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    if uid != 0 or pid <= 1:
+        raise OSError("not the root daemon")
+
+
+def tailscale_get(endpoint, end):
+    """One GET from the system tailscaled's local API, sent as the root card sends it:
+    its bytes, at most LOCAL_API_LIMIT. Every wait ends by `end`."""
+    import http.client
+    import socket
+    if endpoint not in {"status", "serve-config"}:
+        raise ValueError(endpoint)
+    def left():
+        value = end - time.monotonic()
+        if value <= 0:
+            raise TimeoutError()
+        return value
+    class Bounded(socket.socket):
+        def recv_into(self, *arguments):
+            self.settimeout(left())
+            return super().recv_into(*arguments)
+    path = _native_socket()
+    connection = Bounded(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        connection.settimeout(left())
+        connection.connect(str(path))
+        _root_daemon(connection)
+        client = http.client.HTTPConnection("local-tailscaled.sock", timeout=left())
+        client.sock = connection
+        connection.settimeout(left())
+        client.request("GET", "/localapi/v0/" + endpoint,
+                       headers={"Host": "local-tailscaled.sock", "Content-Type": "application/json"})
+        response = client.getresponse()
+        raw = response.read(LOCAL_API_LIMIT + 1)
+        if response.status != 200 or len(raw) > LOCAL_API_LIMIT:
+            raise OSError("local API answer refused")
+        return raw
+    finally:
+        connection.close()
+
+
+def ingress(node_key, home, deadline):
+    """exact: Serve already holds exactly the route the root card would set for this
+    account, on the node named, with the daemon as that card requires it; differs: a
+    fact read is otherwise, or the card would refuse what Serve holds; unknown:
+    something could not be read, and always off Linux. Never refuses, never writes.
+    exact says only that the card could not change Serve, not that it would succeed:
+    the card also checks what this read does not or cannot (the daemon's executable,
+    the current profile, the configuration's ETag, operations pending in its store,
+    the account's shell and the shape of its home)."""
+    end = min(time.monotonic() + INGRESS_SECONDS, deadline - 5)
+    try:
+        if platform.system() != "Linux":
+            return "unknown"
+        predicate = _serve_predicate()
+        def read(endpoint):
+            raw = tailscale_get(endpoint, end)
+            return predicate["decode"](raw) if raw else None
+        status = read("status")
+        own = status.get("Self") if isinstance(status, dict) else None
+        if not isinstance(own, dict):
+            return "unknown"
+        state, tun, version = status.get("BackendState"), status.get("TUN"), status.get("Version")
+        key, name, domains = own.get("PublicKey"), own.get("DNSName"), status.get("CertDomains")
+        if (not all(isinstance(item, str) for item in (state, version, key, name)) or type(tun) is not bool
+                or domains is not None and not isinstance(domains, list)):
+            return "unknown"
+        dns = name.rstrip(".")
+        if (state != "Running" or tun is not True or version != NATIVE_VERSION or key != node_key
+                or not DNS_NAME.fullmatch(dns) or dns not in (domains or [])):
+            return "differs"
+        before = read("serve-config")
+        try:
+            after = predicate["ingress_after"](before, dns, str(home))
+        except predicate["Refusal"]:
+            return "differs"
+        return "exact" if before == after else "differs"
+    except Refusal:
+        # Only the action's own signal handler raises this here: SIGTERM, SIGINT, or
+        # its budget alarm, which the read's own end keeps clear of. Each ends the
+        # action as it does anywhere else.
+        raise
+    except Exception:
+        return "unknown"
+
+
+def update_execute(action, value, deadline):
+    runner = Runner(deadline)
+    try:
+        home = account_profile(value["expected_uid"])
+        python = independent_python()
+        foreign = shutil.which("claudlobby", path=os.environ.get("PATH", ""))
+        family = home / ".local/share/claudlobby-browser"
+        if foreign and Path(foreign) != family / "install/bin/claudlobby":
+            raise Refusal("existing_installation")
+        reads, env = fixed_environment(home), update_environment(home)
+        found = installed(home, python, runner, reads)
+        if found is None:
+            if action != "update-status":
+                raise Refusal("not_prepared")
+            answer = {"state": "absent", "recorded_revision": None, "installed_revision": None,
+                      "receipt_is_ancestor": None, "binding_sha256": None, "setup": None, "interpreter": None,
+                      "update": None, **({"relation": None} if "compare_revision" in value else {})}
+            if "ingress_node_key" in value:
+                answer["ingress"] = ingress(value["ingress_node_key"], home, deadline)
+            return answer
+        head, source = found["head"], found["source"]
+        update = read_record(runner, env, python, found)
+        if action == "update-status":
+            answer = {"state": "recorded", "recorded_revision": found["receipt"]["ref"], "installed_revision": head,
+                      "receipt_is_ancestor": ancestor(runner, reads, source, found["receipt"]["ref"], head),
+                      "binding_sha256": found["binding"], "setup": found["setup"],
+                      "interpreter": found["interpreter"], "update": update}
+            if "compare_revision" in value:
+                compare = value["compare_revision"]
+                answer["relation"] = ("same" if compare == head else "ahead"
+                                      if ancestor(runner, reads, source, compare, head) else "other")
+            if "ingress_node_key" in value:
+                # Last: everything above is read before this read's own time starts.
+                # At most 20 bytes more (,"ingress":"differs"): an answer already
+                # within 20 bytes of 8192 answers unavailable, as any longer one does.
+                answer["ingress"] = ingress(value["ingress_node_key"], home, deadline)
+            return answer
+        if action == "update":
+            target = value["target_revision"]
+            code = update_refusal(update, head, value["expected_installed_revision"], target,
+                                  found["setup"] == "started")
+            if code:
+                raise Refusal(code)
+            result = launch(runner, env, python, found, "apply", target, timeout=BUDGETS[action])
+            answer = dispatched(result, target=target)
+            if answer is not None:
+                return answer
+            if result.returncode == NOT_CONTINUABLE_EXIT:
+                # A team preparation for this target appeared after the read above.
+                raise Refusal("update_in_progress")
+            # The updater refuses anything but a fast-forward to a commit it fetched.
+            if (git(runner, reads, source, "cat-file", "-e", target + "^{commit}", check=False).returncode == 0
+                    and not ancestor(runner, reads, source, head, target)):
+                raise Refusal("not_forward")
+            raise Refusal("unavailable", "unavailable", "inspect", 6)
+        request_id = value["request_id"]
+        code = continue_refusal(update, request_id)
+        if code:
+            raise Refusal(code)
+        result = launch(runner, env, python, found, "continue", "--expected-request", request_id, timeout=BUDGETS[action])
+        answer = dispatched(result, request_id=request_id)
+        if answer is not None:
+            return answer
+        if result.returncode == NOT_CONTINUABLE_EXIT:
+            raise Refusal("not_continuable")
+        if continue_refusal(read_record(runner, env, python, found), request_id) == "no_such_request":
+            raise Refusal("no_such_request")
+        raise Refusal("unavailable", "unavailable", "inspect", 6)
+    except Refusal:
+        raise
+    except Exception:
+        raise Refusal("unavailable", "unavailable", "inspect", 6) from None
+    finally:
+        runner.close()
+
+
+def update_main(action, fd=0):
+    # update-status reads; update and update-continue have the updater already on
+    # this computer move it, dispatch and exit. None waits for the updater,
+    # rewrites the receipt or asks anything.
+    os.umask(0o077)
+    operation = UPDATE_ACTIONS[action]
+    deadline = STARTED + BUDGETS[action]
+    exit_code = 0
+    def interrupted(_number, _frame):
+        raise Refusal("unavailable", "unavailable", "inspect", 6)
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
+    signal.signal(signal.SIGALRM, interrupted)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, deadline - time.monotonic() - 4))
+    try:
+        answer = update_execute(action, request(fd, deadline, action), deadline)
+    except Refusal as error:
+        if error.code == "invalid_request":
+            answer, exit_code = {"state": "refused", "code": "invalid_request"}, 2
+        elif error.state == "refused" and error.code in UPDATE_REFUSALS[action]:
+            answer, exit_code = {"state": "refused", "code": error.code}, 4
+        else:
+            answer, exit_code = {"state": "unavailable", "code": "unavailable"}, 6
+    except Exception:
+        answer, exit_code = {"state": "unavailable", "code": "unavailable"}, 6
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    output = (json.dumps({"schema_version": 1, "operation": operation, **answer}, sort_keys=True,
+                         separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+    if len(output) > 8192:
+        output, exit_code = (json.dumps({"schema_version": 1, "operation": operation, "state": "unavailable",
+                                         "code": "unavailable"}, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"), 6
+    sys.stdout.buffer.write(output)
+    return exit_code
 
 
 def main(action, fd=0):
@@ -1499,7 +1719,7 @@ def main(action, fd=0):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1]))
+    raise SystemExit(update_main(sys.argv[1]) if sys.argv[1] in UPDATE_ACTIONS else main(sys.argv[1]))
 # END EMBEDDED PYTHON
 FIXED_OPERATION_PYTHON
 if [ "$(/usr/bin/uname -s 2>/dev/null)" = Darwin ]; then
@@ -1593,9 +1813,18 @@ darwin_existing_python() {
 }
 # END DARWIN EXISTING PYTHON SHELL
 operation=host-install-v1
-[ "$1" != status ] || operation=host-install-status-v1
+case "$1" in
+    status) operation=host-install-status-v1 ;;
+    update-status) operation=host-update-status-v1 ;;
+    update) operation=host-update-v1 ;;
+    update-continue) operation=host-update-continue-v1 ;;
+esac
 if ! darwin_existing_python "$(/usr/bin/id -u)"; then
-    printf '{"account_uid":null,"activated":false,"binding_sha256":null,"code":"runtime_not_admitted","next":"inspect","operation":"%s","prepared":false,"schema_version":1,"source_revision":null,"state":"unavailable"}\n' "$operation"
+    case "$operation" in
+        host-install-v1|host-install-status-v1)
+            printf '{"account_uid":null,"activated":false,"binding_sha256":null,"code":"runtime_not_admitted","next":"inspect","operation":"%s","prepared":false,"schema_version":1,"source_revision":null,"state":"unavailable"}\n' "$operation" ;;
+        *) printf '{"code":"unavailable","operation":"%s","schema_version":1,"state":"unavailable"}\n' "$operation" ;;
+    esac
     exit 6
 fi
 exec "$DARWIN_RUNTIME_PYTHON" -I -B /dev/fd/3 "$1" 4<&-

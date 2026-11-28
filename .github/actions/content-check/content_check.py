@@ -130,7 +130,9 @@ def _email(m: re.Match) -> bool:
     return not (local == "git" and domain in ("github.com", "gitlab.com"))
 
 
-_HOME_PLACEHOLDERS = {"me", "you", "runner", "someone", "foo", "bar", "alice", "bob", "operator", "shared", "root"}
+# claudlobby is the team account setup creates on a Linux computer: the
+# product's own name, never a person's.
+_HOME_PLACEHOLDERS = {"me", "you", "runner", "someone", "foo", "bar", "alice", "bob", "operator", "shared", "root", "claudlobby"}
 
 
 def _home(m: re.Match) -> bool:

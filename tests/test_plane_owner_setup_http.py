@@ -247,3 +247,417 @@ def test_provider_signin_real_http_and_shutdown_drain(synthetic_signin,profile,f
     assert not worker.is_alive()
     if finish=='shutdown':assert env.read_text()=='export ROUTE=private\n'
     else:assert env.read_text().count('CLAUDE_CODE_OAUTH_TOKEN=')==1
+
+
+def test_preview_gets_time_for_its_stage_processes_and_launch_keeps_its_own(setup_http):
+    app,*_=setup_http
+    seconds=lambda operation:app.connected_setup.response_seconds({"setup_operation":operation})
+    assert seconds("preview")==90 and seconds("launch")==45
+    assert {seconds(op) for op in ("context","receipt","signin-begin","signin-status","signin-code","signin-cancel")}=={15}
+
+
+def test_context_answers_during_preparation_and_still_refuses_a_foreign_record(setup_http,setup_authority):
+    from uuid import uuid4
+    app,access,_,_,_,grant=setup_http
+    engine=app.connected_setup.engine
+    engine.store.allow(grant)
+    scope={"directory":grant.install_directory,"manifests":[str(access.root/"local"/grant.fleet/"fleet.yaml")]}
+    record={"target":grant.source_revision,"config_fingerprint":None,"finalized":False,"phase":"prepare",
+            "request_id":str(uuid4()),"initialization_scope":scope}
+    with TestClient(app,base_url=HOST) as client:
+        s=session(client,setup_http);token=s['token']
+        from claudlobby.plane.owner_access import VerifiedReader
+        engine.store.begin_preview(VerifiedReader(OWNER,token),grant,"Improve checkout tests")
+        setup_authority[-1].retained["record"]=record
+        with engine.store.preview_lease():
+            context=post(client,'context',token)
+            assert context.status_code==200,context.text
+            assert context.json()['preview_state']=='preparing' and context.json()['request'] is None
+            setup_authority[-1].retained["record"]={**record,"target":"c"*40}
+            assert post(client,'context',token).status_code==403
+
+
+def test_state_answers_a_session_with_no_approval_and_changes_nothing(setup_http):
+    app,access,_,_,_,_=setup_http
+    with TestClient(app,base_url=HOST) as client:
+        s=session(client,setup_http)
+        assert post(client,'context',s['token']).status_code==503  # the read that needs an approval
+        before=access.path.read_bytes()
+        answer=post(client,'state',s['token'])
+        assert answer.status_code==200,answer.text
+        assert _today(answer)==_wire({"version":1,"computer":"not_started","provider":{"state":"not_linked"},"team":{"state":"none"},
+            "teams":0,"bots":[],"helper":{"state":"asleep"}})
+        assert 'set-cookie' not in answer.headers and access.path.read_bytes()==before
+        assert not (access.root/'local').exists() and not (access.root/'state/setup-preview.lock').exists()
+
+
+@pytest.mark.parametrize('computer',['fresh','starting','started','linked','launched'])
+def test_state_answers_for_each_kind_of_computer(setup_http,monkeypatch,computer):
+    from claudlobby import active_config
+    from claudlobby.plane import owner_source
+    app,access,_,_,_,_=setup_http
+    token='sk-ant-oat01-'+'x'*80
+    if computer in ('started','linked'):monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    if computer=='starting':monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'starting')  # an unfinished start
+    if computer=='launched':
+        monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'other')
+        monkeypatch.setattr(active_config,'read_current_config',lambda root,*,installation,revision=None:{"fleets":["shop"]})
+    env=access.root/'.env'
+    env.write_text("export ROUTE=private\n"+(f"export CLAUDE_CODE_OAUTH_TOKEN='{token}'\n" if computer=='linked' else ''))
+    env.chmod(0o600)
+    with TestClient(app,base_url=HOST) as client:
+        answer=post(client,'state',session(client,setup_http)['token'])
+    assert answer.status_code==200,answer.text
+    assert token not in answer.text and 'ROUTE' not in answer.text
+    linked=computer=='linked'
+    assert _today(answer)==_wire({"version":1,"computer":"not_started" if computer in ('fresh','starting') else "started",
+        "provider":{"state":"linked" if linked else "not_linked"},"team":{"state":"none"},
+        "teams":1 if computer=='launched' else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}})
+
+
+SCOPE={"directory":"/home/example/app","manifests":["/home/example/app/local/shop/fleet.yaml"]}
+@pytest.mark.parametrize('record,team',[
+    (None,'none'),
+    ({"phase":"quiesce","initialization_scope":SCOPE,"job_dispatch":None},'none'),  # a Preview nothing launched
+    ({"phase":"git","initialization_scope":SCOPE,"job_dispatch":{"unit":"x"}},'launch_unfinished'),  # in progress
+    ({"phase":"done","initialization_scope":SCOPE,"job_dispatch":{"unit":"x"},"health_errors":{"shop/lead":"down"}},'launch_unfinished'),
+    ({"phase":"done","initialization_scope":SCOPE,"job_dispatch":{"unit":"x"},"health_errors":{}},'none'),
+    ({"phase":"git","initialization_scope":None,"job_dispatch":{"unit":"x"}},'none'),  # an ordinary update
+    ('unreadable','launch_unfinished')])
+def test_state_says_when_a_dispatched_launch_has_not_finished(setup_http,monkeypatch,record,team):
+    from claudlobby import git_update
+    from claudlobby.plane import owner_source
+    app,*_=setup_http
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    def read(installation):
+        if record=='unreadable': raise git_update.UpdateError('current update record cannot be read')
+        return record
+    monkeypatch.setattr(git_update,'read_update',read)
+    with TestClient(app,base_url=HOST) as client:
+        answer=post(client,'state',session(client,setup_http)['token'])
+    assert answer.status_code==200,answer.text
+    assert answer.json()['team']=={"state":team} and answer.json()['computer']=='started'
+    assert 'home' not in answer.text and 'shop' not in answer.text
+
+
+TOKEN_LINE="export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-"+"x"*80+"'\n"
+@pytest.mark.parametrize('case,text,mode,linked',[
+    ('saved',TOKEN_LINE,0o600,True),
+    ('empty bare',"CLAUDE_CODE_OAUTH_TOKEN=\n",0o600,False),
+    ('empty single quotes',"export CLAUDE_CODE_OAUTH_TOKEN=''\n",0o600,False),
+    ('empty double quotes','CLAUDE_CODE_OAUTH_TOKEN=""\n',0o600,False),
+    ('a malformed earlier line',"export ROUTE=two words\n"+TOKEN_LINE,0o600,False),
+    ('a mode other than 0600',TOKEN_LINE,0o640,False),
+    ('a file over 64 KiB',"# "+"x"*65536+"\n"+TOKEN_LINE,0o600,False),
+    ('an API key',"export ANTHROPIC_API_KEY='sk-ant-api03-"+"y"*80+"'\n",0o600,False),
+    ('no environment file',None,None,False)])
+def test_state_linked_only_for_a_saved_sign_in_line_with_a_value(setup_http,monkeypatch,case,text,mode,linked):
+    from claudlobby.plane import owner_source, provider_signin
+    app,access,_,_,_,_=setup_http
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:'started')
+    env=access.root/'.env'
+    if text is None: env.unlink(missing_ok=True)
+    else: env.write_text(text); env.chmod(mode)
+    # Claude's own login files are not the sign-in line: a computer with only those reads as not linked.
+    (access.root/'.claude').mkdir(exist_ok=True); (access.root/'.claude'/'.credentials.json').write_text('{"claudeAiOauth":{}}')
+    before=None if text is None else env.read_bytes()
+    with TestClient(app,base_url=HOST) as client:
+        answer=post(client,'state',session(client,setup_http)['token'])
+    assert answer.status_code==200,(case,answer.text)
+    assert _today_provider(answer)=={"state":"linked" if linked else "not_linked"},case
+    assert answer.json()['helper']=={"state":"later" if linked else "asleep"},case
+    assert 'sk-ant' not in answer.text and (text is None or env.read_bytes()==before)
+    # The sign-in check itself is unchanged: any saved line, even an empty one, still refuses a new attempt.
+    if case in ('saved','empty bare','empty single quotes','empty double quotes','a malformed earlier line'):
+        with pytest.raises(provider_signin.SigninRefused) as refused: provider_signin.environment_ready(access.root)
+        assert refused.value.code==("environment_format" if case=='a malformed earlier line' else "credential_already_present")
+    if case=='an API key': provider_signin.environment_ready(access.root)
+
+
+@pytest.mark.parametrize('wrong',['origin','binding','computer'])
+def test_state_refuses_a_wrong_origin_binding_or_computer(setup_http,monkeypatch,wrong):
+    from claudlobby.plane import owner_setup
+    app,access,_,_,_,_=setup_http
+    with TestClient(app,base_url=HOST) as client:
+        token=session(client,setup_http)['token']
+        if wrong=='binding':
+            real=app.connected_setup.workspace.active_binding
+            monkeypatch.setattr(app.connected_setup.workspace,'active_binding',
+                lambda principal:SimpleNamespace(issuer=real(principal).issuer,operational_origin='https://other.example.test'))
+        if wrong=='computer': monkeypatch.setattr(owner_setup,'source_host_uid',lambda root:'host_'+'f'*32)
+        answer=post(client,'state',token,extra={'Origin':HOST} if wrong=='origin' else None)
+    assert answer.status_code==403,answer.text
+    assert 'linked' not in answer.text and 'teams' not in answer.text
+
+
+def test_state_refuses_a_computer_with_no_installation(setup_http,monkeypatch):
+    from claudlobby import resources
+    app,*_=setup_http
+    with TestClient(app,base_url=HOST) as client:
+        token=session(client,setup_http)['token']
+        package=resources.get_resources()
+        monkeypatch.setattr(resources,'get_resources',lambda:SimpleNamespace(installation=None,source_revision=package.source_revision))
+        answer=post(client,'state',token)
+    assert answer.status_code==403,answer.text
+    assert 'linked' not in answer.text and 'teams' not in answer.text
+
+
+def test_state_needs_a_live_session_and_takes_no_input(setup_http):
+    app,*_=setup_http
+    with TestClient(app,base_url=HOST) as client:
+        assert post(client,'state',None).status_code==403
+        assert post(client,'state','A'*43).status_code==403
+        s=session(client,setup_http)
+        assert post(client,'state',s['token'],{'generation':'x'}).status_code==403
+        assert post(client,'state',s['token'],extra={'X-Claudlobby-Owner':'0'}).status_code==403
+        assert post(client,'state',s['token']).status_code==200
+        from tests.test_plane_owner_connected_http import post as connected
+        assert connected(client,'logout',token=s['token']).status_code==200
+        assert post(client,'state',s['token']).status_code==403
+    assert app.connected_setup.response_seconds({"setup_operation":"state"})==15
+
+
+def test_status_answers_ready_once_a_launch_binds_the_recorder(setup_http,monkeypatch):
+    # The browser's working form (document 03) follows this answer: after a healthy Launch the same session reads
+    # ready with a read profile, because the Launch's commit binds the new recorder (update_operation's first-fleet step).
+    from claudlobby import git_update
+    from tests.plane_setup import initialize_plane
+    from claudlobby.plane.owner_source import complete_first_fleet_source, inspect_source
+    app,access,_,_,_,grant=setup_http
+    app.connected_setup.engine.store.allow(grant)
+    def apply(installation,*,expected_request_id):
+        initialize_plane(access.root)
+        complete_first_fleet_source(access.root)
+        return {"update":git_update.read_update(installation),"dispatch":"submitted"}
+    monkeypatch.setattr(git_update,"apply_or_continue",apply)
+    with TestClient(app,base_url=HOST) as client:
+        s=session(client,setup_http); token=s['token']
+        assert client.get('/api/owner/connected/status',headers=headers(token)).json()['state']=='setup_only'
+        plan=post(client,'preview',token,{'generation':grant.generation,'goal':'Improve checkout tests'}).json()
+        assert post(client,'launch',token,binding(plan)).status_code==200
+        status=client.get('/api/owner/connected/status',headers=headers(token))
+        assert status.status_code==200,status.text
+        answer=status.json()
+        assert answer['state']=='ready' and 'setup_profile' not in answer
+        assert answer['read_profile']['profile']=='direct-owner-read-v1'
+        assert answer['read_profile']['host_uid']==inspect_source(access.root)==s['setup_profile']['host_uid']
+
+
+# The parts read's marker, and the link approval at the door. Every other key of the parts read is
+# today's, byte for byte; the four sign-in calls take a link approval's generation on a started computer.
+from tests.test_plane_owner_setup import link_signin, _link_row, _attempts  # noqa: E402,F401
+
+
+def _wire(value):
+    """How the door writes an answer (Starlette's JSONResponse)."""
+    return json.dumps(value,ensure_ascii=False,allow_nan=False,indent=None,separators=(",",":")).encode()
+
+
+def _today(answer):
+    """The parts read's bytes without the marker: exactly today's answer. The marker must be there."""
+    link=answer.json()['provider']['link']
+    assert link in ('available','not_here')
+    marker=b',"link":'+_wire(link)
+    assert answer.content.count(marker)==1
+    return answer.content.replace(marker,b'')
+
+
+def _today_provider(answer):
+    return {key:value for key,value in answer.json()['provider'].items() if key!='link'}
+
+
+@pytest.mark.parametrize('computer,marker',[('fresh','not_here'),('starting','not_here'),('started','available'),
+    ('started mac','not_here'),('linked','available'),('team approval','not_here'),('launched','not_here'),
+    ('team tables unreadable','not_here')])
+def test_link_marker_values(setup_http,monkeypatch,computer,marker):
+    from claudlobby import active_config
+    from claudlobby.plane import owner_setup, owner_source
+    app,access,_,_,_,grant=setup_http
+    monkeypatch.setattr(owner_setup,'_linux',lambda:computer!='started mac')
+    state={'fresh':'fresh','starting':'starting','launched':'other'}.get(computer,'started')
+    monkeypatch.setattr(owner_source,'start_state',lambda root,installation:state)
+    if computer=='launched':
+        monkeypatch.setattr(active_config,'read_current_config',lambda root,*,installation,revision=None:{"fleets":["shop"]})
+    if computer=='team approval': app.connected_setup.engine.store.allow(grant)  # today's guide, nine cards
+    if computer=='team tables unreadable':
+        with access._connection(write=True) as conn: conn.execute('CREATE TABLE setup_metadata(singleton INTEGER)')
+    env=access.root/'.env'
+    env.write_text("export ROUTE=private\n"+("export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-"+"x"*80+"'\n" if computer=='linked' else ''))
+    env.chmod(0o600)
+    with TestClient(app,base_url=HOST) as client:
+        token=session(client,setup_http)['token']
+        answers=[post(client,'state',token) for _ in range(2)]
+    assert all(answer.status_code==200 for answer in answers),answers[0].text
+    assert [answer.json()['provider']['link'] for answer in answers]==[marker,marker], 'the same for a computer, read after read'
+    assert answers[0].json()['provider']['state']==('linked' if computer=='linked' else 'not_linked')
+
+
+def test_link_marker_does_not_depend_on_an_approval(link_signin,profile,monkeypatch):
+    from claudlobby.plane import owner_setup
+    monkeypatch.setattr(owner_setup,'_linux',lambda:True)
+    app,fixture=_link_app(link_signin,profile)
+    with TestClient(app,base_url=HOST) as client:
+        token=session(client,fixture)['token']
+        with_approval=post(client,'state',token)
+        with link_signin.access._connection(write=True) as conn: conn.execute('DROP TABLE setup_link')
+        without=post(client,'state',token)
+    shown=with_approval.json(); signin=shown['provider'].pop('signin')
+    assert signin['phase']=='approved' and shown==without.json() and shown['provider']['link']=='available'
+
+
+def _link_app(link,profile):
+    """The lasting service's door on link_signin's computer, and the tuple session() reads."""
+    async def verify(scope):return OWNER
+    app=create_owner_browser_app(link.access.root,verify_principal=verify,expected_origin=HOST,
+        sampler=_Sampler({}),workspace_bootstrap=WorkspaceBootstrapConfig(ISSUER,ORIGIN))
+    app.access._clock=link.access._clock
+    async def keys(_):return json.dumps({'keys':[profile[1]]}).encode()
+    app.workspace_bootstrap.keys.get=keys
+    return app,(app,link.access,[OWNER],link.clock,profile,link.approval)
+
+
+def _poll(client,bearer,args,state):
+    import time
+    deadline=time.monotonic()+8
+    while time.monotonic()<deadline:
+        status=post(client,'signin-status',bearer,args)
+        if status.json().get('state')==state: return status
+        time.sleep(.025)
+    pytest.fail(status.text)
+
+
+def test_link_http_begin_answers_200_and_worker_waits(link_signin,profile):
+    from claudlobby.plane.provider_signin import signin_running
+    app,fixture=_link_app(link_signin,profile)
+    with TestClient(app,base_url=HOST) as client:
+        bearer=session(client,fixture)['token']
+        args={'generation':link_signin.approval.generation,'attempt_id':str(uuid4())}
+        begin=post(client,'signin-begin',bearer,args)
+        assert begin.status_code==200,begin.text
+        assert begin.json()['generation']==args['generation'] and begin.json()['state'] in ('starting','waiting')
+        waiting=_poll(client,bearer,args,'waiting')
+        assert waiting.json()['url'].startswith('https://claude.com/cai/oauth/authorize?')
+        assert signin_running(link_signin.access.root) is True, 'its worker holds the sign-in lease while it waits'
+        assert post(client,'signin-begin',bearer,{**args,'attempt_id':str(uuid4())}).status_code==403
+        assert post(client,'signin-code',bearer,{**args,'code':'sensitive#wrong'}).status_code==403
+        worker=app.connected_setup.engine.signin._thread
+        cancelled=post(client,'signin-cancel',bearer,args)
+        assert cancelled.status_code==200 and cancelled.json()['state']=='cancelled',cancelled.text
+        assert not worker.is_alive() and signin_running(link_signin.access.root) is False, 'released after its last write'
+    assert link_signin.env.read_text()=='export ROUTE=private\n'
+
+
+def test_http_door_signin_without_team_tables(link_signin,profile,monkeypatch):
+    from claudlobby.plane.owner_setup import OwnerSetup
+    from claudlobby.plane.provider_signin import LinkStore
+    def schema(conn): pytest.fail('a team table was read on the link road')
+    reached=[]; authorize=LinkStore.authorize
+    def observed(self,reader,**kwargs):
+        reached.append(kwargs.get('expected') is not None); return authorize(self,reader,**kwargs)
+    monkeypatch.setattr(LinkStore,'authorize',observed)
+    app,fixture=_link_app(link_signin,profile)
+    with TestClient(app,base_url=HOST) as client:
+        bearer=session(client,fixture)['token']
+        monkeypatch.setattr(OwnerSetup,'_schema',staticmethod(schema))
+        args={'generation':link_signin.approval.generation,'attempt_id':str(uuid4())}
+        assert post(client,'signin-begin',bearer,args).status_code==200
+        for operation,extra,status in (('signin-status',{},200),('signin-code',{'code':'accepted#wrong'},403),('signin-cancel',{},200)):
+            reached.clear()
+            assert post(client,operation,bearer,{**args,**extra}).status_code==status,operation
+            assert reached, operation  # admitted by the link store
+            assert status!=200 or reached[-1] is True, operation  # and closed by it, against the same approval
+        with link_signin.access._connection(write=True) as conn:
+            conn.execute('CREATE TABLE setup_metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL)')
+        assert post(client,'signin-status',bearer,args).status_code==503, 'only some team tables: unavailable'
+
+
+def test_link_generation_refused_by_every_other_operation(link_signin,profile):
+    app,fixture=_link_app(link_signin,profile)
+    generation=link_signin.approval.generation
+    request={'generation':generation,'request_id':str(uuid4()),'config_fingerprint':'c'*64,'source_revision':link_signin.approval.source_revision}
+    with TestClient(app,base_url=HOST) as client:
+        bearer=session(client,fixture)['token']
+        before=link_signin.access.path.read_bytes()
+        for operation,body in (('context',{}),('preview',{'generation':generation,'goal':'Improve checkout tests'}),
+                               ('launch',request),('receipt',request)):
+            assert post(client,operation,bearer,body).status_code in (403,503),operation
+        assert link_signin.access.path.read_bytes()==before and not link_signin.args.dispatches
+
+
+H_STEPS=['H3','H6','H7','H8','H9']
+
+
+@pytest.mark.parametrize('row',['H1','H2','H3','H4','H5','H6','H7','H8','H9','H10'])
+def test_link_refusal_order_door(link_signin,profile,monkeypatch,row):
+    from claudlobby.plane import owner_setup_http
+    from claudlobby.plane.owner_access import AccessDenied
+    from claudlobby.plane.provider_signin import LinkStore
+    app,fixture=_link_app(link_signin,profile)
+    engine=app.connected_setup.engine; log=[]
+    def wrap(name,owner,attribute,replacement=None):
+        original=getattr(owner,attribute)
+        def step(*args,**kwargs):
+            if name not in log: log.append(name)
+            return (replacement or original)(*args,**kwargs)
+        monkeypatch.setattr(owner,attribute,step)
+    generation=link_signin.approval.generation
+    args={'generation':generation,'attempt_id':str(uuid4())}
+    with TestClient(app,base_url=HOST) as client:
+        bearer=session(client,fixture)['token']
+        if row=='H7':
+            # A team approval that names this generation is today's team call, with today's refusals.
+            engine.store.allow(link_signin.team); args['generation']=link_signin.team.generation
+        if row=='H6':
+            with link_signin.access._connection(write=True) as conn:
+                conn.execute('CREATE TABLE setup_grant(singleton INTEGER PRIMARY KEY)')
+        if row=='H2':
+            monkeypatch.setattr(owner_setup_http,'source_host_uid',lambda root:(_ for _ in ()).throw(AccessDenied('setup_denied')))
+        if row=='H4':
+            real=app.connected_setup.workspace.active_binding
+            monkeypatch.setattr(app.connected_setup.workspace,'active_binding',
+                lambda principal:SimpleNamespace(issuer=real(principal).issuer,operational_origin='https://other.example.test'))
+        if row=='H8': args['generation']=str(uuid4())
+        rows_before=_attempts(link_signin.access)
+        wrap('H3',engine.store,'session')
+        wrap('H6',engine,'signin_approval')
+        wrap('H7',engine.store,'authorize')
+        wrap('H8',engine.signin.link,'authorize')
+        def replaced(reader,generation,attempt_id):  # the engine call answers, then a new yes replaces the approval
+            LinkStore(link_signin.access).write(link_signin.scope)
+            return {'state':'answered'}
+        wrap('H9',engine,'signin_status',replaced if row=='H10' else None)
+        token={'H3':'A'*43}.get(row,bearer)
+        body={**args,'attempt_id':'not-an-attempt'} if row=='H5' else args
+        answer=post(client,'signin-status',token,body,{'X-Claudlobby-Owner':'0'} if row=='H1' else None)
+    status={'H6':503,'H7':403}.get(row,403)
+    assert answer.status_code==status,(row,answer.text)
+    assert answer.json()=={'state':'unavailable' if status==503 else 'denied'}
+    expected={'H1':[],'H2':[],'H3':['H3'],'H4':['H3'],'H5':['H3'],'H6':['H3','H6'],'H7':['H3','H6','H7','H9'],
+              'H8':['H3','H6','H8'],'H9':['H3','H6','H8','H9'],'H10':['H3','H6','H8','H9']}[row]
+    assert log==expected,(row,log)
+    if row!='H10': assert _attempts(link_signin.access)==rows_before, 'a refusal writes nothing'
+
+
+@pytest.mark.parametrize('computer',['no team tables','team tables unreadable'])
+@pytest.mark.parametrize('body',['valid','malformed'])
+def test_signin_door_without_link_approval_answers_as_today(link_signin,profile,monkeypatch,computer,body):
+    # A computer that holds no link approval: the four sign-in calls are today's team calls, in today's
+    # order (the team approval first, then the payload), so they answer exactly as before.
+    app,fixture=_link_app(link_signin,profile)
+    engine=app.connected_setup.engine; log=[]
+    with link_signin.access._connection(write=True) as conn:
+        conn.execute('DROP TABLE setup_link')
+        if computer=='team tables unreadable': conn.execute('CREATE TABLE setup_metadata(singleton INTEGER)')
+    def wrap(name,owner,attribute):
+        original=getattr(owner,attribute)
+        def step(*args,**kwargs): log.append(name); return original(*args,**kwargs)
+        monkeypatch.setattr(owner,attribute,step)
+    args={'generation':link_signin.approval.generation,'attempt_id':str(uuid4()) if body=='valid' else 'not-an-attempt'}
+    with TestClient(app,base_url=HOST) as client:
+        bearer=session(client,fixture)['token']
+        wrap('team',engine.store,'authorize'); wrap('session',engine.store,'session'); wrap('link',engine,'signin_approval')
+        answers=[post(client,operation,bearer,{**args,**extra}) for operation,extra in
+                 (('signin-begin',{}),('signin-status',{}),('signin-code',{'code':'accepted#'+'b'*32}),('signin-cancel',{}))]
+    assert [(answer.status_code,answer.json()) for answer in answers]==[(503,{'state':'unavailable'})]*4
+    assert log==['team']*4, 'the team approval is read first, as today, and nothing after it'
+    assert _attempts(link_signin.access)==[]

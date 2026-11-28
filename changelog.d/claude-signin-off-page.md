@@ -1,0 +1,3 @@
+### Fixed — a lost sign-in check off the setup page no longer sends the person away
+
+Off the setup page, the Claude part's first sign-in check answered by anything but a refusal (a lost answer, or a computer error such as a 500) showed "Link Claude from the page where you added this computer." and never asked again. Only the computer's refusal says that now; a lost or failed call keeps the attempt and offers Check sign-in progress, as on the setup page, and a Try again this browser never sent leaves no step to check. The shared line for a check with no clear answer now reads "Could not check sign-in on this computer.", which is true for a lost answer and for an error alike ("Could not reach" was wrong when the computer answered with an error).

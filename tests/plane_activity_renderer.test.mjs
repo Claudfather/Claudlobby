@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { taskPermissionSummary } from '../claudlobby/plane/ui/permission-panel.js';
 
 const source = await readFile(new URL('../claudlobby/plane/ui/app.js', import.meta.url), 'utf8');
 
@@ -68,7 +69,8 @@ test('connected directory separates recorded activity from live evidence and ope
   c.openAgentTeam(b.uid);c.rosterIdentities.get(a.uid).fleet_uid='changed';c.openAgentTeam(a.uid);
   c.sessionPaused=true;c.openAgentTeam(a.uid);assert.equal(opened.length,0);
 });
-const panel = await import(`data:text/javascript;base64,${Buffer.from(await readFile(new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url), 'utf8')).toString('base64')}`);
+const panelSource = await readFile(new URL('../claudlobby/plane/ui/panel-state.js', import.meta.url), 'utf8');
+const panel = await import(`data:text/javascript;base64,${Buffer.from(panelSource).toString('base64')}`);
 // Execute the real channel renderer, stopping before unrelated page mounting.
 const rendering = source.slice(0, source.indexOf('// WHY a card needs you')).replace(/^import .*;\n/gm, '');
 assert.ok(rendering.includes('function threadArticle('));
@@ -255,6 +257,21 @@ test('genuine paired nudge renders authored reason, accurate purpose and full ra
   assert.match(rendered, /<details><summary>Technical detail/);
   assert.ok(rendered.includes(panel.esc(t.messages[0].body)));
   assert.match(rendered, new RegExp(msg));
+});
+
+test('a room heading keeps whole characters from the first message', () => {
+  const prefix = 'x'.repeat(99);
+  for (const [character, tail] of [['👩🏽‍💻', ' details'], ['e\u0301', ' details'], ['界', ' details'], ['👩🏽‍💻', '']]) {
+    const body = prefix + character + tail;
+    const t = thread();
+    t.title = t.work_item_id = null;
+    t.task_events = [];
+    Object.assign(t.messages[0], {emitter: 'human', message_class: 'chat', work_item_id: null, body, body_words: body});
+    const rendered = html(t);
+    const heading = prefix + character + (tail ? '…' : '');
+    assert.ok(rendered.includes(`class="t-title">${heading}</span>`));
+    assert.ok(rendered.includes(body));
+  }
 });
 
 test('an assigned task uses its exact original assignment link and a plain title fallback', () => {
@@ -589,11 +606,29 @@ test('unavailable report content does not become status or evidence, legacy rema
 });
 
 
+test('the attention section distinguishes a paused task from a question for the reader', async () => {
+  const shell = await readFile(new URL('../claudlobby/plane/ui/index.html', import.meta.url), 'utf8');
+  assert.match(shell, /<h2>Needs attention <span id="attn-count"/);
+  const reasons = source.slice(source.indexOf('const WHY ='), source.indexOf('// An OUTSTANDING nudge'));
+  const describe = runInNewContext(reasons + '\nattentionWhy', {...panel, ago: () => '5m ago'});
+  const blocked = {attention: true, attention_reason: ['blocked_waiting']};
+  const paused = describe(blocked);
+  assert.match(paused, /Work paused — <small>/);
+  assert.match(paused, /Open the task to read the latest update\./);
+  assert.doesNotMatch(paused, /waiting on you|claudlobby --/);
+  assert.match(describe({...blocked, attention_since: '2026-01-01T00:00:00Z'}), /Work paused 5m ago/);
+  const overdue = describe({...blocked, attention_reason: ['overdue', 'blocked_waiting'],
+    attention_since: '2026-01-01T00:00:00Z'});
+  assert.match(overdue, /Work paused — <small>/);
+  const asked = describe({attention: true, attention_reason: ['escalated'], attention_question: 'Which step needs review?'});
+  assert.match(asked, /needs you: Which step needs review\?/);
+});
+
 test('permission attention opens the existing task and clears after a fresh decided read', () => {
   const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
   const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
   const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
-    ...panel, renderState: () => false, document: {
+    ...panel, taskPermissionSummary, renderState: () => false, document: {
       getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
     },
   });
@@ -601,9 +636,15 @@ test('permission attention opens the existing task and clears after a fresh deci
     attention: true, attention_reason: ['permission_pending'], permission_pending: 2};
   board.renderTasks({data: {tasks: [row]}});
   assert.match(nodes.attention.innerHTML, /2 permission requests need review/);
+  assert.match(nodes.attention.innerHTML, /open the task for its status/);
   assert.match(nodes.attention.innerHTML, /data-task-open="workshop::wi_/);
   assert.match(nodes.attention.innerHTML, /data-task-fleet="web"/);
   assert.equal(nodes['attn-count'].textContent, 1);
+  board.renderTasks({data: {tasks: [{...row, permission_incomplete: true,
+    attention_reason: ['permission_pending', 'permission_unavailable']}]}});
+  assert.match(nodes.attention.innerHTML, /At least 2 permission requests need review\. Permission history is incomplete/i);
+  assert.equal((nodes.attention.innerHTML.match(/permission history is incomplete/gi) || []).length, 1);
+  assert.equal((nodes.attention.innerHTML.match(/open the task/gi) || []).length, 1);
   board.renderTasks({data: {tasks: [{...row, attention_reason: ['permission_unavailable'], permission_pending: 0}]}});
   assert.match(nodes.attention.innerHTML, /permission history is incomplete/);
   assert.doesNotMatch(nodes.attention.innerHTML, /no tasks need attention/);
@@ -612,7 +653,7 @@ test('permission attention opens the existing task and clears after a fresh deci
   assert.doesNotMatch(nodes.tasks.innerHTML, /permission requests need review/);
 });
 
-test('task-specific partial coverage cannot become a clear empty board and preserves readable task rows', () => {
+function taskCardHarness() {
   const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
   const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
   const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
@@ -620,6 +661,30 @@ test('task-specific partial coverage cannot become a clear empty board and prese
       getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
     },
   });
+  return {board, nodes};
+}
+
+test('task card titles keep whole characters at the 160-character boundary', () => {
+  const {board, nodes} = taskCardHarness();
+  const first = '<note> ' + 'a'.repeat(152) + '👩🏽‍💻';
+  for (const tail of ['', ' details']) {
+    const row = {task_id:wi, fleet:'example', title:first + tail, state:'queued', resolved:true, attention:false};
+    board.renderTasks({state:'ok', data:{tasks:[row], issue_count:0, truncated:false}});
+    assert.ok(nodes.tasks.innerHTML.includes('>' + panel.esc(first) + (tail ? '…' : '') + '</button>'));
+  }
+});
+
+test('without a segmenter plain headings stay short and Unicode and full results are preserved', () => {
+  const legacy = runInNewContext(panelSource.replace(/^export /gm, '') + '\n({clip, graphemePrefix})', {Intl:{}});
+  const plain = 'a'.repeat(160);
+  assert.equal(legacy.clip(plain + ' tail', 160), plain + '…');
+  const joined = 'a'.repeat(99) + '👩🏽‍💻 résumé';
+  assert.equal(legacy.clip(joined, 100), joined);
+  assert.equal(legacy.graphemePrefix(plain + ' tail', 160), plain + ' tail');
+});
+
+test('task-specific partial coverage cannot become a clear empty board and preserves readable task rows', () => {
+  const {board, nodes} = taskCardHarness();
   // Other endpoints can remain healthy; this envelope alone defines task coverage.
   const env = {state:'ok',data:{tasks:[],issue_count:0,truncated:false,
     coverage:{total:2,reachable:1,partial:true}}};
@@ -657,7 +722,9 @@ test('older task browsing survives polls, deduplicates qualified rows and refres
     sessionPaused:false,sessionEpoch:1,currentFleet:'all',fleetQuery:()=>'',refreshBoards(){refreshes++;},
     async jget(url){calls++;assert.equal(url,'/api/tasks?cursor=older');return env([row('north::'+wi,'Repeated'),row('south::'+wi,'Older peer')],'older',null);}});
   board.renderTasks(recent);assert.equal(nodes['task-load-older'].hidden,false);
+  assert.match(nodes['task-history-count'].textContent,/^1 task loaded\./);
   await board.loadOlderTasks();assert.equal(calls,1);
+  assert.match(nodes['task-history-count'].textContent,/^2 tasks loaded\./);
   assert.match(nodes.tasks.innerHTML,/Recent/);assert.match(nodes.tasks.innerHTML,/Older peer/);assert.doesNotMatch(nodes.tasks.innerHTML,/Repeated/);
   board.acceptTaskPoll(env([row('north::new','Polled')],null,'newer'),true);
   assert.match(nodes.tasks.innerHTML,/Older peer/);assert.doesNotMatch(nodes.tasks.innerHTML,/Polled/);
@@ -682,9 +749,18 @@ test('task filters use exact assignees locally, preserve warning/count truth and
   assignee.value=board.taskAssigneeKey(row);assignee.onchange();
   assert.match(nodes.attention.innerHTML,/North active/);assert.doesNotMatch(nodes.attention.innerHTML,/South active/);
   assert.match(nodes.tasks.innerHTML,/North result/);assert.equal(nodes['attn-count'].textContent,2);
-  assert.match(nodes['task-filter-count'].textContent,/2 of 3 loaded task records/);assert.match(nodes['task-filter-count'].textContent,/Attention count is unfiltered/);
+  assert.match(nodes['task-filter-count'].textContent,/2 of 3 loaded task records/);assert.match(nodes['task-filter-count'].textContent,/Filters don’t change the attention count for loaded tasks/);
+  env.data.task_page = {version:1, next_cursor:'older'};
+  board.renderTasks(env);
+  assert.doesNotMatch(nodes['task-filter-count'].textContent,/Choose Load older work/);
   assert.match(nodes.attention.innerHTML,/2\/3 sources|Showing the newest 200/);assert.match(nodes.attention.innerHTML,/task-history issue/);
   status.value='blocked';status.onchange();
+  assert.match(nodes['task-filter-count'].textContent,/0 of 3 match\. Choose Load older work/);
+  for (const page of [{version:1, next_cursor:null}, {version:2, next_cursor:'older'}]) {
+    env.data.task_page = page;
+    board.renderTasks(env);
+    assert.doesNotMatch(nodes['task-filter-count'].textContent,/Choose Load older work/);
+  }
   assert.match(nodes.attention.innerHTML,/no matching recorded tasks/);assert.match(nodes.tasks.innerHTML,/no matching recorded tasks/);
   assert.doesNotMatch(nodes.attention.innerHTML,/no tasks need attention/);
   const selected=assignee.value;env.data.tasks=[peer];board.renderTasks(env);
@@ -701,39 +777,83 @@ test('task filters use exact assignees locally, preserve warning/count truth and
   assert.equal(assignee.value,'');assert.equal(status.value,'');assert.equal(assignee.disabled,true);
 });
 
-for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal'])
-test(`task board refresh preserves exact keyboard position without stealing focus: ${change}`, () => {
+const visibleText = html => html.replace(/<[^>]*>/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+
+function taskBoardFocusHarness(change) {
+  let room = 'all';
   const document = {activeElement:null, documentElement:{style:{setProperty(){}}}};
   const body = {}; document.activeElement = body;
   const nodes = Object.fromEntries(['attention','tasks','attn-count'].map(id => [id, {
     children:[], hidden:false, isConnected:true,
-    contains(node) { return this.children.includes(node); },
+    contains(node) { return this === node || this.children.some(button => button === node || button.summary === node); },
     closest() { return this.hidden ? this : null; },
     focus() { if (!this.hidden) document.activeElement=this; },
-    querySelectorAll() { return this.children; },
+    querySelectorAll(selector) {
+      return selector === '[data-task-open]' ? this.children : this.children.filter(button => button.record.open).map(button => button.summary);
+    },
     set innerHTML(value) {
-      for (const child of this.children) { child.isConnected=false; if (document.activeElement===child) document.activeElement=body; }
-      this.children=[...value.matchAll(/data-task-open="([^"]+)" data-task-fleet="([^"]*)"/g)].map(match => ({
-        dataset:{taskOpen:match[1],taskFleet:match[2]}, isConnected:true,hidden:false,disabled:false,
-        closest:() => this.hidden ? this : null,
-        focus() { if (this.isConnected && !this.hidden && !this.disabled) document.activeElement=this; },
-      }));
+      for (const button of this.children) {
+        button.isConnected = false;
+        if (document.activeElement === button || document.activeElement === button.summary) document.activeElement = body;
+      }
+      const records = [...value.matchAll(/<details class="task-record"( open)?><summary data-task-record="([^"]+)"/g)];
+      this.children=[...value.matchAll(/data-task-open="([^"]+)" data-task-fleet="([^"]*)"/g)].map((match, index) => {
+        const card = {querySelector: () => button.summary};
+        const record = {open: Boolean(records[index][1])};
+        const button = {
+          dataset:{taskOpen:match[1],taskFleet:match[2]}, isConnected:true,hidden:false,disabled:false,
+          closest:() => this.hidden ? this : null, parentElement:card,
+          focus() { if (this.isConnected && !this.hidden && !this.disabled) document.activeElement=this; },
+          record,
+          summary:{
+            dataset:{taskRecord: visibleText(records[index][2])},
+            parentElement:record,
+            focus() { document.activeElement=this; },
+          },
+        };
+        return button;
+      });
       if (change==='disabled') for (const child of this.children) child.disabled=true;
     },
   }]));
   document.getElementById=id=>nodes[id];
   const boardSource=source.slice(source.indexOf('// WHY a card needs you'),source.indexOf('function railRow('));
-  const board=runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`,{...panel,document});
+  const syncRoom=source.slice(source.indexOf('function syncWorkRoom()'),source.indexOf('function activeRoom()'));
+  const board=runInNewContext(`${rendering}\n${boardSource}\n${syncRoom}\n({renderTasks,acceptTaskPoll,resetTaskFilters,syncWorkRoom,snapshot:()=>taskSnapshot})`, {
+    ...panel, document, workRoom:room, activeRoom:()=>room, workLoop:{setRoom(){}},
+    showLoading() { nodes.tasks.innerHTML = ""; nodes.attention.innerHTML = ""; },
+  });
   const row={task_id:'north::'+wi,fleet:'north / web',title:'Review release',state:'queued',attention:false};
   const env=tasks=>({state:'ok',data:{tasks}});
   board.renderTasks(env([row]));
+  return {board, document, nodes, env, row, selectRoom: value => { room = value; }};
+}
+
+for (const change of ['same', 'lane', 'removed', 'source', 'unavailable', 'hidden', 'disabled', 'elsewhere', 'modal',
+    'record-open', 'record-lane', 'record-closed', 'record-peer', 'record-reset', 'record-unavailable', 'record-elsewhere'])
+test(`task board refresh preserves exact keyboard position without stealing focus: ${change}`, () => {
+  const watchRecord = change.startsWith('record');
+  const {board, document, nodes, env, row} = taskBoardFocusHarness(change);
   const original=nodes.tasks.children[0]; original.disabled=false;original.focus();
+  if (watchRecord) { original.record.open = change !== 'record-closed'; original.summary.focus(); }
   const outside={id:change==='modal'?'task-detail-close':'work-body'};
-  if (['elsewhere','modal'].includes(change)) document.activeElement=outside;
+  if (['elsewhere','modal','record-elsewhere'].includes(change)) document.activeElement=outside;
+  if (change === 'record-reset') { board.resetTaskFilters(); assert.equal(original.record.open, false); }
   if (change==='hidden') nodes.tasks.hidden=true;
   const peer={...row,task_id:change==='source'?'south::'+wi:row.task_id,fleet:'south / web'};
-  board.renderTasks(change==='unavailable'?{state:'unavailable'}:env(['removed','source'].includes(change)?[peer]
-    : [peer,{...row,attention:change==='lane'}]));
+  board.renderTasks(['unavailable','record-unavailable'].includes(change)?{state:'unavailable'}:env(['removed','source','record-peer'].includes(change)?[peer]
+    : [peer,{...row,attention:['lane','record-lane'].includes(change)}]));
+  if (watchRecord) {
+    const buttons = [...nodes.attention.children, ...nodes.tasks.children];
+    const matching = buttons.find(button => button.dataset.taskFleet === row.fleet);
+    const other = buttons.find(button => button.dataset.taskFleet === peer.fleet);
+    if (other) assert.equal(other.record.open,false);
+    if (matching) assert.equal(matching.record.open,!['record-closed','record-reset'].includes(change));
+    const expected = change === 'record-elsewhere' ? outside : ['record-peer','record-reset','record-unavailable'].includes(change) ? nodes.tasks : matching.summary;
+    assert.equal(document.activeElement,expected);
+    return;
+  }
   if (['elsewhere','modal'].includes(change)) assert.equal(document.activeElement,outside);
   else if (['removed','source','unavailable','disabled'].includes(change)) {
     assert.equal(document.activeElement,nodes.tasks); assert.equal(nodes.tasks.tabIndex,-1);
@@ -743,4 +863,170 @@ test(`task board refresh preserves exact keyboard position without stealing focu
     assert.notEqual(document.activeElement,original);
     assert.equal(document.activeElement.dataset.taskFleet,row.fleet);
   }
+});
+
+for (const outcome of ['returns', 'initially-unavailable', 'refused', 'focus-moved', 'room-changed', 'session-paused'])
+test(`a task record whose source is still checking: ${outcome}`, () => {
+  const {board, document, nodes, row, selectRoom} = taskBoardFocusHarness();
+  const peer = {...row, task_id:'south::' + wi, fleet:'south / web'};
+  const reply = (tasks, status, state = 'ok') => ({state, data:{tasks,
+    sources:[{key:'north',state:status}, {key:'south',state:'ok'}]}});
+  const opened = nodes.tasks.children[0];
+  opened.record.open = true;
+  opened.summary.focus();
+  const read = {};
+  board.acceptTaskPoll(outcome === 'initially-unavailable' ? reply([], 'checking', 'unavailable') : reply([peer], 'checking'), false, read);
+  assert.ok(!nodes.tasks.children.some(button => button.dataset.taskOpen === row.task_id));
+  assert.equal(document.activeElement, nodes.tasks);
+  const outside = {id:'new-focus'};
+  if (outcome === 'focus-moved') document.activeElement = outside;
+  if (outcome === 'room-changed') {
+    selectRoom('another room');
+    assert.equal(board.syncWorkRoom(), true);
+    assert.equal(board.snapshot(), null, 'an implicit room change retires the filter snapshot');
+  }
+  if (outcome === 'session-paused') board.resetTaskFilters();
+  if (outcome === 'refused') {
+    board.acceptTaskPoll(reply([peer], 'denied'), true, read);
+    assert.equal(nodes.tasks.children[0].record.open,false);
+  }
+  board.acceptTaskPoll(reply([row, peer], 'ok'), true, read);
+  const [restored, other] = nodes.tasks.children;
+  assert.equal(other.record.open, false);
+  assert.equal(restored.record.open, ['returns','initially-unavailable','focus-moved'].includes(outcome));
+  const expected = outcome === 'focus-moved' ? outside : restored.record.open ? restored.summary : nodes.tasks;
+  assert.equal(document.activeElement,expected);
+});
+
+// Merge gate (document 03): once a team is ready the frame shows this connected view, so every bot-written field it
+// draws must stay plain text. Each field carries markup; the rendered tag sequence must match a render of ordinary
+// words, no img, a, form or input is made from it, and its literal text is visible.
+const HOSTILE = '<img src=x onerror=1><a href="https://example.invalid">link</a><form><input></form>';
+const tagSequence = html => [...html.matchAll(/<\/?([a-zA-Z][\w-]*)/g)].map(m => m[0].toLowerCase());
+async function renderWorkingView(value) {
+  const made = [], byId = new Map();
+  class El {
+    constructor(tag = 'div', id = '') { this.tagName = tag.toUpperCase(); this.id = id; this.children = []; this.dataset = {}; this.attributes = {};
+      this.style = {setProperty(){}}; this.classList = {toggle(){}, add(){}, remove(){}, contains: () => false};
+      this.hidden = false; this.disabled = false; this.value = ''; this._html = ''; this._text = ''; this.isConnected = true; made.push(this); }
+    set innerHTML(v) { this._html = String(v); this._text = ''; this.children = []; } get innerHTML() { return this._html; }
+    set textContent(v) { this._text = String(v); this._html = ''; this.children = []; } get textContent() { return this._text; }
+    querySelectorAll() { return []; } querySelector() { return null; } addEventListener() {} removeEventListener() {}
+    append(...nodes) { for (const n of nodes) this.children.push(...(n.tagName === '#FRAGMENT' ? n.children : [n])); }
+    appendChild(n) { this.append(n); return n; } replaceChildren(...n) { this.children = []; this._html = ''; this.append(...n); }
+    remove() {} after() {} focus() {} scrollIntoView() {} contains() { return false; } closest() { return null; }
+    setAttribute(k, v) { this.attributes[k] = String(v); } getAttribute(k) { return this.attributes[k] ?? null; } removeAttribute(k) { delete this.attributes[k]; }
+  }
+  const document = {activeElement: null, documentElement: new El('html'), body: new El('body'), querySelectorAll: () => [], addEventListener() {},
+    getElementById: id => { if (!byId.has(id)) byId.set(id, new El('div', id)); return byId.get(id); },
+    createElement: tag => new El(tag), createDocumentFragment: () => new El('#fragment')};
+  const at = '2026-01-01T00:00:00Z', team = 'north / team', teamUid = 'north::fleet_' + 'b'.repeat(32);
+  const lead = {uid: 'north::actor_' + 'a'.repeat(32), alias: 'north::bot:team/lead', short: value('bot name'), fleet: team, kind: 'actor', last_seen: at, provisional: false};
+  const presence = {state: 'ok', data: {sources: [{key: 'north', state: 'ok', sampler_available: true, provenance: {checked_at: at}}], bots: [{alias: lead.alias, live: 'up', presence: 'working'}]}};
+  const display = await import(new URL('../claudlobby/plane/ui/workspace-display.js', import.meta.url));
+  const tail = source.slice(source.indexOf('function activeRoom()'), source.indexOf('const ownerSession'))
+    + source.slice(source.indexOf('function roomBotPanel('));
+  const view = runInNewContext(`${source.slice(0, source.indexOf('let trustTimer =')).replace(/^import .*;\n/gm, '')}\n${tail}\n`
+    + '({renderFleet,renderChannel,renderTasks,renderHeader,renderSummary,renderOverview,renderFleetTabs,renderAgentDirectory,openRoomBot,pushDebugRow,'
+    + 'use(f,c){fleets=f;currentFleet=c;}})', {...panel, ...display, document, URL, Date, conversationTaskLink,
+    jget: async () => presence, createEventSource() {}, interactionApi: {dispose() {}}, localStorage: {getItem: () => null, setItem() {}},
+    workLoop: {canSelectMessageRecipient: () => false, selectMessageRecipient: () => false}, refreshEquipmentAction() {}, inspectBot() {},
+    setTimeout, clearTimeout, setInterval() {}, clearInterval() {}});
+  view.use([{alias: team, uid: teamUid, display_label: value('team name'), bots: 1, source_state: 'ok', connection_state: 'ready'}], team);
+  const message = (id, fields) => ({msg_id: `north::msg_${id.repeat(32)}`, message_class: 'chat', emitter: 'claudlobby.v1', command_type: null,
+    sender_alias: lead.alias, recipient_alias: 'human:owner', work_item_id: null, assignment_id: null, ingest_seq: 1, truncated: 0,
+    occurred_at: at, delivery: 'unconfirmed', delivery_state: null, tx: [], ...fields});
+  const markup = [], snapshot = () => markup.push(made.map(el => el._html).join('\n'), made.map(el => panel.esc(el._text)).join('\n'));
+  view.renderFleet({state: 'ok', data: {identities: [lead]}});
+  view.renderFleetTabs();
+  view.renderChannel({state: 'ok', data: {sources: [{key: 'north', state: 'ok'}], checkins_state: 'ok', threads: [
+    {key: 't1', work_item_id: null, title: value('thread title'), latest_seq: 1, repo: null, task_events: [], messages: [message('4', {
+      sender_short: value('sender'), recipient_short: value('recipient'), body: value('raw body'), body_words: value('message body'),
+      delivery_state: value('delivery'), ingest_seq: value('message seq')})]},
+    {key: 't4', work_item_id: null, title: null, latest_seq: 4, task_events: [], messages: [message('6', {sender_short: 'lead', recipient_short: 'owner',
+      body: null, body_words: null, body_bytes: value('body bytes')})]},
+    {key: 't2', work_item_id: null, title: null, latest_seq: 2, task_events: [], messages: [message('5', {sender_short: 'lead', recipient_short: 'owner',
+      body: value('first line'), body_words: null, report: {state: 'captured', status: 'progress', percent: null, pr_role: 'authored',
+        pr_url: value('pr link'), artifacts: [value('artifact')], issues: [value('issue link')]}})]},
+    thread(value('nudge reason'))],
+    checkins: [{actor_uid: lead.uid, actor_alias: lead.alias, actor_short: value('checkin bot'), fleet: team, action: 'ask',
+      reason: value('checkin reason'), rationale: value('rationale'), occurred_at: at}]}});
+  view.renderTasks({state: 'ok', data: {issue_count: value('issue count'), truncated: true, limit: value('task limit'), tasks: [{task_id: 'north::wi_' + '3'.repeat(32), fleet: team, title: value('task title'),
+    state: 'active', attention: true, attention_reason: ['escalated', 'nudged'], attention_question: value('question'), attention_by: value('asked by'),
+    attention_since: at, attention_act_reason: value('act reason'), nudged_at: at, nudged_by: value('nudged by'),
+    current_assignment: {assignee_short: value('assignee'), assignee_uid: lead.uid, expected_by: null, dispatch_message_id: 'm'},
+    delivery: {integrity: value('integrity')}, last_event: {event: value('last event'), occurred_at: at}, assignment_count: 1,
+    resolved: false, issues: [{code: value('issue code'), blocking: true}]}]}});
+  view.renderHeader({state: 'ok', data: {totals: {fleets: 1, bots: value('header bots'), working: value('working'), attention: value('need you'),
+    overdue: value('overdue'), provisional: value('unconfirmed'), live_poll: value('header poll'), recorder_gaps: [{label: value('recorder gap')}]},
+    coverage: {partial: true, reachable: value('reachable'), total: value('total')}, fleets: []}});
+  view.renderSummary({data: {coverage: {reachable: 1, total: 1}, sources: [{label: value('summary source'), state: 'ok', summary: {daemon_serving: true}, provenance: {}}]}});
+  const card = {alias: team, uid: teamUid, display_label: value('team name'), capture: value('capture'), open: value('open'),
+    attention: value('attention'), overdue: value('team overdue'), bots: value('team bots'), provisional: value('provisional'),
+    presence: {counts: {}, live_poll: value('overview poll')}, orphaned: value('orphaned'), orphaned_reason: value('orphaned reason', true),
+    newest_report_at: at, reports_24h: value('reports 24h'), last_activity_at: at};
+  view.renderOverview({state: 'ok', data: {fleets: [{...card, unacked: value('unacked'), acked_by: value('acked by'), acked_at: value('acked at', true)},
+    {...card, alias: 'north / other', uid: 'north::fleet_' + 'c'.repeat(32), unacked: null, unacked_reason: value('unacked reason', true)}],
+    sources: [{key: 'north', label: value('source label'), connection_state: 'ready', state: value('read state'), remediation: value('summary error')},
+      {key: 'east', label: 'East', connection_state: 'ready', state: 'ok', host: {spool_files: value('spool files'), daemon_serving: true}}]}});
+  view.pushDebugRow({ingested_at: at, family: value('debug family'), ingest_seq: value('debug seq')});
+  view.renderAgentDirectory({state: 'ok', data: {identities: [lead], sources: [{key: 'north', label: value('source label'), state: 'ok'},
+    {key: 'south', label: value('other source'), state: value('source state')}]}}, presence);
+  await view.openRoomBot(lead);
+  snapshot();
+  view.renderChannel({state: 'unavailable', remediation: value('channel error')});
+  view.renderTasks({state: 'unavailable', remediation: value('task error')});
+  snapshot();
+  return markup.join('\n');
+}
+test('bot-written text in the connected view is drawn as plain text: rooms, check-ins, tasks, roster, teams, summaries and errors', async () => {
+  // Attribute-only fields (titles) are checked as escaped attribute values; the rest must also be visible text.
+  const fields = new Set(), attributes = new Set();
+  const hostile = await renderWorkingView((name, attribute) => { (attribute ? attributes : fields).add(name); return `${HOSTILE}·${name}`; });
+  const plain = await renderWorkingView(name => `plain words·${name}`);
+  assert.deepEqual(tagSequence(hostile), tagSequence(plain), 'the same elements, whatever the text');
+  assert.doesNotMatch(hostile, /<(?:img|form|input)\b|<a href="https:\/\/example\.invalid"/i);
+  const text = visibleText(hostile);
+  assert.deepEqual([fields.size, attributes.size], [60, 3]);
+  for (const name of fields) assert.ok(text.includes(`${HOSTILE}·${name}`), `${name} is visible as its literal text`);
+  for (const name of attributes) assert.ok(hostile.includes(`title="${panel.esc(`${HOSTILE}·${name}`)}"`), `${name} is an escaped title`);
+});
+
+test('delivery status distinguishes an unsuccessful send from an unconfirmed one', () => {
+  const boardSource = source.slice(source.indexOf('// WHY a card needs you'), source.indexOf('function railRow('));
+  const nodes = Object.fromEntries(['attention', 'tasks', 'attn-count'].map(id => [id, {innerHTML: '', hidden: false}]));
+  const board = runInNewContext(`${rendering}\n${boardSource}\n({renderTasks})`, {
+    ...panel, document: {
+      getElementById: id => nodes[id], documentElement: {style: {setProperty() {}}},
+    },
+  });
+  const assignee = {assignee_short:'worker', expected_by:'2026-01-01T00:00:00Z'};
+  const row = {task_id:wi, fleet:'example', title:'Review the checklist', current_assignment:assignee,
+    state:'assigned', resolved:true, attention:true, attention_since:'2026-01-02T00:00:00Z'};
+  for (const [reason, label, advice, command] of [
+    ['send_failed', 'The send attempt failed', 'Open the task to see who is assigned.', 'task withdraw'],
+    ['never_activated', 'The send attempt is unconfirmed', 'Open the task to check its recorded delivery status.', 'task reassign'],
+  ]) {
+    for (const reasons of [[reason], ['escalated', reason, 'overdue']]) {
+      board.renderTasks({state:'ok', data:{tasks:[{...row, attention_reason:reasons}], issue_count:0, truncated:false}});
+      const card = nodes.attention.innerHTML;
+      const details = card.match(/<details class="task-record">([\s\S]*?)<\/details>/)?.[1];
+      assert.ok(details, 'recovery commands start in the closed Record details');
+      const shown = card.replace(/<details[\s\S]*?<\/details>/g, '');
+      assert.ok(shown.includes(label + ' —'));
+      assert.ok(shown.includes(advice));
+      assert.doesNotMatch(shown, /claudlobby --|never delivered/);
+      assert.ok(details.includes('Check the original message receipt before retrying delivery.'));
+      assert.ok(details.includes('claudlobby --json ' + command));
+      assert.equal(details.includes('assignment reschedule'), reasons.includes('overdue'));
+      assert.equal((details.match(/task reassign/g) || []).length,
+        reason === 'never_activated' || reasons.includes('overdue') ? 1 : 0);
+    }
+  }
+  board.renderTasks({state:'ok', data:{tasks:[{...row, attention_reason:['overdue']}], issue_count:0, truncated:false}});
+  const overdue = nodes.attention.innerHTML;
+  assert.ok(overdue.includes('assignment reschedule ASSIGNMENT_ID --expected-by'));
+  assert.doesNotMatch(overdue, /original message receipt|task withdraw/);
+  board.renderTasks({state:'ok', data:{tasks:[{...row, attention:false, attention_reason:null}], issue_count:0, truncated:false}});
+  assert.doesNotMatch(nodes.tasks.innerHTML, /claudlobby --|original message receipt/);
 });

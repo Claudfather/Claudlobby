@@ -496,9 +496,12 @@ This recovery does not start a service, renew authority or configure Serve.
 There is no TCP fallback. A daemon unable to reach this socket leaves access
 unavailable; it is not a reason to expose an unprotected loopback backend.
 
-**Persistent serving after setup.** Once the host is activated, paired and its
-recorder bound, the existing host-job compositor can supervise the same owner
-server. In this host's `system.yaml` override, configure:
+**Persistent serving after setup.** Once the computer is started, with or
+without a team, paired and its recorder bound, the existing host-job compositor
+can supervise the same owner server. A computer started with no team already
+runs its recorder and its scheduled host jobs; its owner service runs when this
+host's settings turn it on, either before the start or in the start's own
+approved settings change. In this host's `system.yaml` override, configure:
 
 ```yaml
 host:
@@ -522,8 +525,8 @@ extra no unit is composed, as reported by the switch table.
 
 Stage and inspect a normal configuration plan, stop the foreground server with
 Ctrl-C, then activate that plan through the existing operator CLI. This is an
-explicit handover after first-team setup, not a second server during guided
-launch. A foreground collision refuses activation before pausing the fleet.
+explicit handover after the computer is started or after first-team setup, not
+a second server during guided launch. A foreground collision refuses activation before pausing the fleet.
 Upgrades quiesce an already-managed owner service through the normal producer
 phase and recheck socket availability before starting its replacement. Startup
 still repeats socket ownership and liveness checks.
@@ -1146,9 +1149,10 @@ secure session-cookie boundaries. JSON is size/time bounded; duplicate and
 unknown fields are refused. They never register identities or author grants.
 
 Context version 1 names the selected fleet alias in `room` and `scope.fleet`,
-returns declared bot UIDs as recipients, `simulation: false`, and only the
-`message` action. The server recomputes frozen host/fleet/actor bindings and the
-current local message grant for every request. Opaque workspace/viewer hashes
+returns declared bot UIDs as recipients, marks the configured manager's with
+`lead: true`, `simulation: false`, and only the `message` action. The server
+recomputes frozen host/fleet/actor bindings and the current local message grant
+for every request. Opaque workspace/viewer hashes
 are comparison fences, not secret capabilities; viewer binds principal, owner
 revision, frozen fleet UID, human actor and durable message-grant generation,
 and survives session-cookie rotation. Revoke/reallow creates a new viewer scope
@@ -1216,8 +1220,9 @@ only the explicit local nudge grant, advertises one configured manager recipient
 with `lead: true`, `actions: ["nudge"]`, and the validated current `release_id`.
 Its viewer hash has a fixed `task.nudge` namespace and binds the principal,
 owner revision, fleet, registered human actor and nudge-grant generation.
-Ordinary-message version-1 requests, responses and viewer-hash inputs are
-unchanged. Revoking either action grant does not change the other capability.
+Ordinary-message version-1 requests and viewer-hash inputs are unchanged; its
+response marks the same manager as lead. Revoking either action grant does not
+change the other capability.
 A read session alone grants neither action; no HTTP path registers an actor or
 authors a grant. Feedback has its own capability below; replies and permission
 decisions remain unsupported.

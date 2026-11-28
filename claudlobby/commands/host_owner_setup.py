@@ -25,6 +25,15 @@ from ..command_result import CommandFailure, CommandOutput
 from ..plane.owner_access import AccessDenied, AccessUnavailable
 from ..plane.owner_setup import OwnerSetup
 
+#: The fixed workspace issuer and operational origin of both typed guides.
+_WORKSPACE_ORIGINS = ("https://claudfather.ai", "https://plane.claudfather.ai")
+#: The native Tailscale the typed Linux guides admit.
+LINUX_TAILSCALE = Path("/usr/bin/tailscale")
+#: How long a started computer's lasting service has to answer; it is already running.
+READY_SECONDS = 15
+#: Core's existing line for an owner listener that did not answer.
+_NOT_READY = "local owner server did not become ready; inspect serving configuration and private socket"
+
 
 def _say(terminal, text):
     if terminal is not None:
@@ -198,9 +207,9 @@ def _commit_owner_override(plan):
         temporary.unlink(missing_ok=True)
 
 
-def _configuration(args, paths, terminal, cli):
+def _serving_configuration(args, paths, terminal, cli):
+    """The owner listener's exact settings, validated by the service's own builder."""
     from ..plane.owner_service import service_command
-    from .setup import _template_config, _local_project, _account_directory
     config = {
         "origin": _input(terminal, args.origin, "This computer's exact private HTTPS origin"),
         "tailscale": _input(terminal, args.tailscale, "Absolute native Tailscale executable"),
@@ -215,6 +224,12 @@ def _configuration(args, paths, terminal, cli):
         service_command(paths.root, cli, config)
     except ValueError as exc:
         raise CommandFailure("invalid_argument", "local serving configuration is invalid; review exact HTTPS origins and absolute native paths") from exc
+    return config
+
+
+def _configuration(args, paths, terminal, cli):
+    from .setup import _template_config, _local_project, _account_directory
+    config = _serving_configuration(args, paths, terminal, cli)
     fleet = _input(terminal, args.target_fleet, "First team name", "web-app")
     template = getattr(args, "template", "revenue-web-app")
     project = getattr(args, "project_directory", None)
@@ -342,10 +357,37 @@ def _serving(command, path, origin, *, consent=None):
                         continue
 
 
-def _original_launch(state):
-    raise CommandFailure("conflict", "a first-team launch is already retained; inspect its original receipt before continuing",
-                         data={"launch_id": state.launch_id, "launch_plan": state.launch_plan,
-                               "generation": state.grant.generation})
+@contextmanager
+def _ssh_waiting():
+    """No listener: typed operations arrive on their own admitted SSH channels."""
+    class Waiting:
+        @staticmethod
+        def wait(timeout):
+            time.sleep(timeout)
+            raise subprocess.TimeoutExpired("owner-ssh-guide", timeout)
+    yield Waiting()
+
+
+def _ssh_origin(source):
+    """The server's own logical authority key, bound to the captured destination."""
+    import asyncio
+    from ..plane.owner_ssh import MAC_TAILSCALE, SSHSessionVerifier
+    from ..plane.owner_ingress import NativePrincipalResolver
+    from .owner_stdio import StdioRefused
+    try:
+        verifier = SSHSessionVerifier(source, NativePrincipalResolver(tailscale_binary=MAC_TAILSCALE))
+        async def inspect():
+            return await asyncio.wait_for(verifier.origin(), 15)
+        return asyncio.run(inspect())
+    except (AccessDenied, AccessUnavailable, ValueError, OSError, asyncio.TimeoutError):
+        raise StdioRefused("ssh_identity_prerequisite_missing") from None
+
+
+def _operation_retained(root, retained, record):
+    from ..plane.owner_setup import _continuation
+    return CommandFailure("conflict", "a first-team operation is retained; inspect its original receipt and continue locally",
+        data={"request_id":record["request_id"]},
+        hint=_continuation(root,retained.grant) if retained and retained.grant else "host update status")
 
 
 @contextmanager
@@ -361,9 +403,354 @@ def interrupted():
             signal.signal(sig, handler)
 
 
+# The setup finish for a team card approved with the messages mark (``grant.messages``).
+# Its effect is fixed by the stored card, whoever starts it: messages on for that one team under
+# the card's name (numbered if taken), and the launched goal sent to that team's lead once.
+# Fixed: the goal's request id is derived from the Launch's, so a second finish finds the first send.
+_GOAL_REQUEST_LABEL = "claudlobby:setup-goal:"
+
+
+def goal_request_id(launch_request_id):
+    """The setup goal's message request id, derived from the Launch's request id."""
+    from uuid import NAMESPACE_URL, uuid5
+    return str(uuid5(NAMESPACE_URL, _GOAL_REQUEST_LABEL + launch_request_id))
+
+
+def numbered_name(base, taken):
+    """The card's name if free, else the first free ``<base>-2`` .. ``<base>-9`` (the base cut to 38
+    characters, a trailing hyphen removed, so the numbered name still passes the name rule), else None."""
+    if base not in taken:
+        return base
+    stem = base[:38].rstrip("-")
+    return next((f"{stem}-{n}" for n in range(2, 10) if f"{stem}-{n}" not in taken), None)
+
+
+class _Halt(Exception):
+    """A check before the goal's send failed: the goal is not sent, for ``reason``."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
+@contextmanager
+def _finish_lock(root, request_id):
+    """One finish at a time per Launch: an exclusive flock on a private file in ``state/``, released
+    when the holder closes it or dies. Yields False, at once, when another process holds it."""
+    from ..plane.owner_setup import _uuid
+    import fcntl
+    state = Path(root) / "state"
+    if not _uuid(request_id) or state.resolve() != state.absolute():
+        raise AccessUnavailable("setup finish lock is unavailable")
+    fd = os.open(state / f"setup-finish-{request_id}.lock",
+                 os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise AccessUnavailable("setup finish lock is not a private regular file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
+
+
+class _CardEffects:
+    """The finish's reach beyond the authority database: names, registration, the lead, receipts, the send."""
+
+    def __init__(self, paths, store, grant):
+        self.paths, self.store, self.grant = paths, store, grant
+
+    def _selected(self):
+        from ..operation_context import resolve_operation_scope
+        selected, origin = resolve_operation_scope(root=self.paths.root, fleet=self.grant.fleet,
+                                                   package=self.paths.package)
+        if origin is not None:
+            raise CommandFailure("conflict", "the setup finish requires a local operator")
+        return selected
+
+    def taken(self):
+        """Every short name already used here: recorded actors (people and bots) and this team's bots."""
+        from contextlib import closing
+        from ..plane.db import connect_ro, db_file
+        from ..plane.identity import aliases_of_kind
+        from ..plane.inventory import short_alias
+        from ..plane.schema_state import require_current_schema
+        with closing(connect_ro(db_file(self.paths.root))) as conn:
+            conn.execute("BEGIN")
+            require_current_schema(conn)
+            names = {short_alias(alias) for alias in aliases_of_kind(conn, "actor")}
+        return names | set(self._selected().fleet.bots)
+
+    def register(self, alias, check):
+        """Register the card's name (the card was the consent) and read the ids the finish binds.
+        ``check()`` runs inside the registration's admission, just before the name is written."""
+        from .host_owner import _grant_preview, _register_actor
+        from ..runtime_admission import RuntimeIdentity, mutation_admission
+        with mutation_admission(self.paths.root, identity=RuntimeIdentity.current()) as release:
+            preview = _grant_preview(self.paths, self.store, self.grant.fleet, alias, release)
+        if preview["actor_uid"] is None:
+            preview = _register_actor(self.paths, self.store, self.grant.fleet, alias, preview, check)
+        lead = self._selected().fleet.manager
+        return {"owner": preview["owner"], "fleet_uid": preview["bindings"]["fleet_uid"],
+                "actor_uid": preview["actor_uid"], "lead_uid": preview["bindings"]["bots"].get(lead)}
+
+    def receipt(self, fleet_uid, request_id):
+        """The retained request under ``request_id``, or None when none exists."""
+        from ..request_queries import RequestNotFoundError, read_request
+        try:
+            return read_request(self.paths.root, fleet_uid, request_id)
+        except RequestNotFoundError:
+            return None
+
+    def send(self, alias, request_id, text, check):
+        from .message_write import send_to_lead
+        send_to_lead(self.paths.root, package=self.paths.package, fleet=self.grant.fleet, alias=alias,
+                     request_id=request_id, text=text, check=check)
+
+
+def _preview_payload(conn, grant):
+    row = conn.execute("SELECT payload FROM setup_previews WHERE generation=?", (grant.generation,)).fetchone()
+    if row is None:
+        raise AccessUnavailable("the launched Preview is not recorded")
+    return json.loads(row["payload"])
+
+
+def _keep(store, grant, value):
+    """Write the finish's record into the approval's Preview row, in its own transaction."""
+    with store._connection(write=True) as conn:
+        OwnerSetup._schema(conn)
+        payload = _preview_payload(conn, grant)
+        conn.execute("UPDATE setup_previews SET payload=? WHERE generation=?",
+                     (json.dumps({**payload, "messages": value}), grant.generation))
+    return value
+
+
+_REASONS = {"revoked": "setup_withdrawn", "stale": "stale_binding"}
+
+
+def _approval_stands(store, conn, grant):
+    """Read-only: None while this approval stands for an active owner; else ``revoked`` or ``stale``."""
+    from ..plane.owner_setup import setup_still_stands
+    row = conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
+    if row is None or OwnerSetup._grant(row) != grant:
+        return "stale"
+    standing = setup_still_stands(store, conn, row["active"], grant)
+    if standing is not None:
+        return "revoked" if standing == "revoked" else "stale"
+    owner = store._grant(conn)
+    return "stale" if owner is None or not owner.active else None
+
+
+def _still_stands(store, grant):
+    """A check that raises ``_Halt`` unless the approval still stands (read-only)."""
+    def check():
+        with store._connection() as conn:
+            OwnerSetup._schema(conn)
+            reason = _approval_stands(store, conn, grant)
+        if reason is not None:
+            raise _Halt(reason)
+    return check
+
+
+def _stands(store, conn, grant, value):
+    """None while the approval stands, the owner is the one the finish bound, and (once granted) the
+    grant row holds the recorded actor and name; else the reason: ``revoked`` or ``stale``."""
+    reason = _approval_stands(store, conn, grant)
+    if reason is not None:
+        return reason
+    if store._grant(conn).revision != value["owner_revision"]:
+        return "stale"
+    if value.get("state") == "allowed" and not _grant_holds(store, conn, value):
+        return "revoked"
+    return None
+
+
+def _grant_holds(store, conn, value):
+    """The message grant the finish wrote still exists, for the current owner, with its actor and name."""
+    from ..plane.owner_access import OwnerAccess
+    owner = store._grant(conn)
+    if owner is None or not owner.active or owner.revision != value["owner_revision"]:
+        return False
+    held = (conn.execute("SELECT actor_uid, actor_alias FROM message_grants WHERE owner_revision=? AND fleet_uid=?",
+                         (owner.revision, value["fleet_uid"])).fetchone()
+            if OwnerAccess._has_grants(conn, "message") else None)
+    return held is not None and (held["actor_uid"], held["actor_alias"]) == (value["actor_uid"], value["alias"])
+
+
+def _admit(store, grant, ids, value):
+    """Re-check and write in one immediate transaction: the grant and the record, or neither."""
+    from ..plane.owner_access import OwnerAccess
+    value = {**value, "fleet_uid": ids["fleet_uid"], "actor_uid": ids["actor_uid"],
+             "lead_uid": ids["lead_uid"], "owner_revision": ids["owner"].revision}
+    with store._connection(write=True) as conn:
+        OwnerSetup._schema(conn)
+        payload = _preview_payload(conn, grant)
+        reason = _stands(store, conn, grant, value)
+        if reason is None and store._grant(conn) != ids["owner"]:
+            reason = "stale"
+        held = (conn.execute("SELECT actor_uid, actor_alias FROM message_grants WHERE owner_revision=? AND fleet_uid=?",
+                             (value["owner_revision"], value["fleet_uid"])).fetchone()
+                if reason is None and OwnerAccess._has_grants(conn, "message") else None)
+        if reason is not None:
+            value.update(state=reason, reason=_REASONS[reason], goal={"state": "not_sent", "reason": reason})
+        elif held is not None and (held["actor_uid"], held["actor_alias"]) != (value["actor_uid"], value["alias"]):
+            # Approved at the terminal under another name: left as it is.
+            value.update(state="kept", goal={"state": "not_sent", "reason": "other_grant"})
+        else:
+            store._allow_action_in(conn, "message", ids["owner"], value["fleet_uid"], value["actor_uid"], value["alias"])
+            value.update(state="allowed", goal={"request_id": value["goal"]["request_id"], "state": "pending"}
+                         if value["lead_uid"] is not None else {"state": "not_sent", "reason": "no_lead"})
+        conn.execute("UPDATE setup_previews SET payload=? WHERE generation=?",
+                     (json.dumps({**payload, "messages": value}), grant.generation))
+    return value
+
+
+def _sent(view, value, text):
+    """``sent`` only for a receipt whose sender, recipient and body all match, with a submitted transport."""
+    from ..message_payload import MessageBody
+    from ..request_receipts import semantic_digest
+    expected = semantic_digest({"body": MessageBody.from_input(text).text.encode("utf-8"), "kind": "chat"})
+    if (view.operation != "message.send" or view.caller_uid != value["actor_uid"]
+            or view.recipient_uid != value["lead_uid"] or view.semantic_sha256 != expected):
+        return {"state": "unknown", "reason": "request_id_taken"}
+    if any(item.transport is not None and item.transport.status == "submitted" for item in view.transmissions):
+        return {"state": "sent"}
+    return {"state": "unknown", "reason": "send_uncertain"}
+
+
+def _goal(paths, store, grant, record, value, effects):
+    """Send the launched goal once: look its id up first (never resend), then check and send."""
+    goal = value["goal"]
+    request_id = goal["request_id"]
+    with store._connection() as conn:
+        OwnerSetup._schema(conn)
+        text = _preview_payload(conn, grant)["goal"]
+    try:
+        view = effects.receipt(value["fleet_uid"], request_id)
+    except Exception:
+        return {**goal, "reason": "receipt_unavailable"}
+    if view is not None:
+        return {"request_id": request_id, **_sent(view, value, text)}
+
+    def check(ctx, route):
+        """Immediately before the send, inside runtime admission."""
+        from ..git_update import healthy_done, read_update
+        from ..plane.owner_setup import managed_setup
+        if (ctx.caller.uid, ctx.caller.alias, route.peer.uid) != (value["actor_uid"], value["alias"], value["lead_uid"]):
+            raise _Halt("stale")
+        # The Launch is still the computer's current healthy update: no later update finished since.
+        package = managed_setup(paths.root)
+        current = read_update(package.installation)
+        if current != record or not healthy_done(current) or package.source_revision != record["target"]:
+            raise _Halt("stale")
+        with store._connection() as conn:
+            OwnerSetup._schema(conn)
+            reason = _stands(store, conn, grant, value)
+            if reason is not None:
+                raise _Halt(reason)
+            if _preview_payload(conn, grant)["goal"] != text:
+                raise _Halt("goal_changed")
+        try:
+            OwnerSetup(store).check_frozen(grant, record, text)
+        except (AccessDenied, AccessUnavailable, OSError, ValueError, KeyError):
+            raise _Halt("goal_changed") from None
+
+    try:
+        effects.send(value["alias"], request_id, text, check)
+    except _Halt as halt:
+        return {"request_id": request_id, "state": "not_sent", "reason": halt.reason}
+    except Exception:
+        pass  # An error can follow an effect: only the receipt says what happened.
+    try:
+        view = effects.receipt(value["fleet_uid"], request_id)
+    except Exception:
+        return {"request_id": request_id, "state": "unknown", "reason": "receipt_unavailable"}
+    if view is None:
+        return {"request_id": request_id, "state": "pending", "reason": "send_unavailable"}
+    return {"request_id": request_id, **_sent(view, value, text)}
+
+
+def card_answer(store, grant, value):
+    """The finish's answer from its record; ``allowed`` only while the grant row still holds."""
+    answer = {key: value[key] for key in ("state", "reason", "by", "alias", "renamed") if key in value}
+    if "goal" in value:
+        answer["goal"] = {key: value["goal"][key] for key in ("state", "reason") if key in value["goal"]}
+    if value.get("state") == "allowed":
+        with store._connection() as conn:
+            OwnerSetup._schema(conn)
+            if not _grant_holds(store, conn, value):
+                answer.update(state="revoked", reason="messages_revoked")
+    return answer
+
+
+def card_status(store, retained):
+    """For the status run and ``setup-status``: the marked approval's finish answer and launched goal."""
+    grant = retained.grant if retained is not None else None
+    if grant is None or grant.messages is None:
+        return None
+    with store._connection() as conn:
+        OwnerSetup._schema(conn)
+        row = conn.execute("SELECT payload FROM setup_previews WHERE generation=?", (grant.generation,)).fetchone()
+        payload = json.loads(row["payload"]) if row is not None else {}
+    value = payload.get("messages")
+    return {"messages": card_answer(store, grant, value) if value is not None else None, "goal": payload.get("goal")}
+
+
+def card_line(answer):
+    """One key=value line for a terminal: never the goal text."""
+    if answer is None:
+        return "setup_messages state=none"
+    goal = answer.get("goal") or {}
+    fields = (("state", answer.get("state")), ("reason", answer.get("reason")), ("by", answer.get("by")),
+              ("alias", answer.get("alias")), ("goal", goal.get("state")), ("goal_reason", goal.get("reason")))
+    return "setup_messages " + " ".join(f"{key}={value}" for key, value in fields if value is not None)
+
+
+def _card_messages(paths, store, grant, record, *, by, effects=None):
+    """The finish for a marked approval, after a healthy Launch: lock, record, label, registration,
+    one checked transaction, then the goal's checked send and receipt match. Safe to run again."""
+    effects = effects or _CardEffects(paths, store, grant)
+    with _finish_lock(paths.root, record["request_id"]) as held:
+        if not held:
+            return {"state": "in_progress", "by": by}
+        with store._connection() as conn:
+            OwnerSetup._schema(conn)
+            value = _preview_payload(conn, grant).get("messages")
+        if value is None or value.get("state") == "in_progress":
+            stands = _still_stands(store, grant)
+            try:
+                # Before any name is read, and again inside the registration's admission just before
+                # the name is written: a withdrawn or re-paired approval registers nothing.
+                stands()
+                if value is None:
+                    base = grant.messages["alias"].removeprefix("human:")
+                    name = numbered_name(base, effects.taken())
+                    if name is None:
+                        return card_answer(store, grant, _keep(store, grant, {
+                            "state": "name_taken", "by": by, "alias": grant.messages["alias"], "renamed": False,
+                            "goal": {"state": "not_sent", "reason": "name_taken"}}))
+                    # Written before anything is registered: a finish that dies resumes with this label.
+                    value = _keep(store, grant, {"state": "in_progress", "by": by, "alias": "human:" + name,
+                        "renamed": name != base, "goal": {"request_id": goal_request_id(record["request_id"])}})
+                ids = effects.register(value["alias"], stands)
+            except _Halt as halt:
+                start = value or {"by": by, "alias": grant.messages["alias"], "renamed": False}
+                return card_answer(store, grant, _keep(store, grant, {**start, "state": halt.reason,
+                    "reason": _REASONS[halt.reason], "goal": {"state": "not_sent", "reason": halt.reason}}))
+            value = _admit(store, grant, ids, value)
+        if value["state"] == "allowed" and value["goal"]["state"] in ("pending", "unknown"):
+            value = _keep(store, grant, {**value, "goal": _goal(paths, store, grant, record, value, effects)})
+        return card_answer(store, grant, value)
+
 
 def _completed(args, paths, store, terminal, retained, record, package, *, consent=None):
     from ..plane.owner_setup import OwnerSetup
+    from ..git_update import healthy_done
     from ..installation import _setup_binding
     from .host_owner import _setup_messages
     grant = retained.grant
@@ -371,11 +758,15 @@ def _completed(args, paths, store, terminal, retained, record, package, *, conse
     expected = getattr(args, "finish_setup", None)
     if (consent is not None and expected is None
             or expected is not None and _setup_binding(expected) != actual
-            or record.get("maintenance") is not False or record.get("config_committed") is not True
-            or type(record.get("health_errors")) is not dict or record["health_errors"] or record.get("stage_error")
+            or not healthy_done(record)
             or package.source_revision != record["target"] or OwnerSetup(store).operation(grant) != record
             or getattr(args, "target_fleet", None) not in (None, grant.fleet)):
         raise CommandFailure("conflict", "the original setup is not current healthy DONE; inspect its original receipt")
+    if grant.messages is not None:
+        # The team card carried the messages mark: its finish, never the three optional cards.
+        messages = _card_messages(paths, store, grant, record, by="page" if consent is not None else "terminal")
+        return CommandOutput({"state": "setup_complete", "request_id": record["request_id"], "messages": messages},
+                             lines=(card_line(messages),))
     _say(terminal, "Your original team setup completed. Configuration and serving are not repeated. Provider/setup approval did not grant messages.\n")
     messages = _setup_messages(paths, store, terminal, grant.fleet,
         **({"consent": consent} if consent is not None else {}))
@@ -383,7 +774,10 @@ def _completed(args, paths, store, terminal, retained, record, package, *, conse
         lines=("Original setup finished; no Launch or message was sent again.",))
 
 
-def run(args, paths, store, terminal, *, consent=None, profile=None):
+def run(args, paths, store, terminal, *, consent=None, profile=None, ssh=None):
+    """``ssh`` is the captured server SSH source of an explicit SSH-controlled
+    guide: no listener, no owner service, and typed operations on sibling
+    channels. It is never inferred from a frame or from the platform alone."""
     from . import host_owner as console
     from ..active_config import read_current_config
     from ..git_update import read_update
@@ -394,18 +788,23 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
 
     retained = OwnerSetup(store).retained_state() if os.path.lexists(store.path) else None
     if retained and retained.state == "legacy_recovery_required":
+        from ..plane.owner_setup import retained_fields
         raise CommandFailure("conflict", "historical sealed setup requires local recovery; no Git operation was inferred",
-                             data=asdict(retained))
+                             data=retained_fields(retained))
     package = managed_setup(paths.root)
     installation = package.installation
     record = read_update(installation)
     selected = os.path.lexists(paths.root / "state/config.json")
-    if record is not None:
+    # The one record a typed guide over the browser carrier may start again over: this approval's own
+    # prepared Preview with nothing launched (its page closed before Launch). It goes on as a returning
+    # run does. The SSH guide never needed a run alive between Preview and Launch.
+    reopened = (record is not None and consent is not None and ssh is None
+                and getattr(args, "finish_setup", None) is None
+                and OwnerSetup(store).kept_preview(retained, record))
+    if record is not None and not reopened:
         if (not retained or retained.grant is None or record.get("request_id") != retained.launch_id
                 or record.get("config_fingerprint") != retained.launch_plan or record.get("phase") != "done"):
-            raise CommandFailure("conflict", "a first-team operation is retained; inspect its original receipt and continue locally",
-                data={"request_id":record["request_id"]},
-                hint=_continuation(paths.root,retained.grant) if retained and retained.grant else "host update status")
+            raise _operation_retained(paths.root, retained, record)
         snapshot = read_current_config(paths.root, installation=installation, revision=record["target"])
         if snapshot != record.get("candidate_config"):
             raise CommandFailure("conflict", "current configuration differs from the original setup")
@@ -419,18 +818,31 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
         fresh_owner_setup(paths.root, allow_absent=True)
     cli = installation.cli
     typed = {"consent": consent} if consent is not None else {}
+    if ssh is not None and consent is None:
+        raise CommandFailure("invalid_argument", "SSH-controlled setup is the typed guide only")
+    carrier = {}
+    if ssh is not None:
+        from ..plane.owner_ssh import TRANSPORT
+        carrier = {"transport": TRANSPORT}
     if consent is not None:
         if profile is None:
             raise CommandFailure("invalid_argument", "typed guide requires its fixed local profile")
-        profile.prepare_directories(consent, paths)
+        if ssh is not None and profile.runtime is None:
+            raise CommandFailure("invalid_argument", "SSH-controlled setup requires the managed Mac runtime profile")
+        profile.prepare_directories(consent, paths, **({"ssh_policy": True} if ssh is not None else {}))
         profile.prepare_provider(consent, paths)
-        args.origin = profile.origin()
-        args.tailscale, args.tailscale_socket = Path("/usr/bin/tailscale"), ""
-        args.workspace_issuer, args.workspace_origin = "https://claudfather.ai", "https://plane.claudfather.ai"
+        if ssh is not None:
+            from ..plane.owner_ssh import MAC_TAILSCALE
+            args.origin = _ssh_origin(ssh)  # logical key; never a claim of reachable HTTPS
+            args.tailscale, args.tailscale_socket = MAC_TAILSCALE, ""
+        else:
+            args.origin = profile.origin()
+            args.tailscale, args.tailscale_socket = LINUX_TAILSCALE, ""
+        args.workspace_issuer, args.workspace_origin = _WORKSPACE_ORIGINS
         args.socket = paths.root / "state/owner/owner.sock"
         args.template, args.target_fleet, args.repository = "local-project", "web-app", None
         args.project_directory, args.account_directory = str(profile.project), str(profile.account)
-        args.install_directory, args.provider_signin, args.managed_owner = profile.units, profile.provider, True
+        args.install_directory, args.provider_signin, args.managed_owner = profile.units, profile.provider, ssh is None
     config, approval = _configuration(args, paths, terminal, cli)
     if load_host_jobs()["plane-owner"].get("enroll", True) and approval.managed_owner is None:
         raise CommandFailure("conflict", "configured owner enrollment requires explicit --managed-owner handover")
@@ -438,7 +850,12 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
     if not os.path.lexists(store.path):
         console._initialize_first_owner(paths, terminal, **typed)
     owner = store.current_grant()
-    if owner is None or not owner.active:
+    if (owner is None or not owner.active) and ssh is not None:
+        # The browser begins pairing through its own typed SSH operation; the
+        # same local confirmation as every other transport follows here.
+        consent.state("pairing_ready", origin=config["origin"], **carrier)
+        console._confirm_owner(paths, store, terminal, **typed)
+    elif owner is None or not owner.active:
         direct = {**config, "workspace_issuer": None, "workspace_origin": None}
         _say(terminal, "Open " + json.dumps(config["origin"] + "/owner") + " and choose Start pairing.\n")
         command = service_command(paths.root, cli, direct)
@@ -452,20 +869,24 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
     console._describe(terminal, owner)
     if not selected and store.connected().preparation_state() != "ready":
         console._initialize_connected(store, terminal, prepare_workspace=True, **typed)
-    with _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed) as child:
+    with (_ssh_waiting() if ssh is not None else
+          _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed)) as child:
         if not selected:
             workspace_state, binding = store.workspace().status()
             if workspace_state == "absent":
                 _say(terminal, "In your signed-in browser choose Prepare local approval for this computer, then paste its code here.\n")
                 if consent is not None:
-                    consent.state("workspace_ready", origin=config["origin"])
+                    consent.state("workspace_ready", origin=config["origin"], **carrier)
                 console._confirm_workspace(store, terminal, owner, recover=True, **typed)
                 workspace_state, binding = store.workspace().status()
             if (workspace_state != "active" or binding.issuer != config["workspace_issuer"]
                     or binding.operational_origin != config["workspace_origin"]):
                 raise CommandFailure("conflict", "retained workspace differs or is inactive; inspect workspace-status; no binding was replaced")
             _say(terminal, "Retained workspace: " + json.dumps(asdict(binding), ensure_ascii=True) + "\n")
-            retained = OwnerSetup(store).retained_state()
+            entry, retained = retained, OwnerSetup(store).retained_state()
+            if reopened and retained.state != "allowed":
+                # The kept Preview's approval lapsed after the entry check: never ask to allow again.
+                raise _operation_retained(paths.root, retained if retained.grant else entry, record)
             # A browser may retain this invocation's approved Launch as soon as
             # serving is ready. Entry checks already refused pre-existing work;
             # compare the same grant below, then use the normal handoff loop.
@@ -485,7 +906,7 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
         setup = OwnerSetup(store)
         approved = setup.local() if not selected else None
         if consent is not None:
-            consent.state("preview_launch_ready", origin=config["origin"], generation=approved.generation)
+            consent.state("preview_launch_ready", origin=config["origin"], generation=approved.generation, **carrier)
         try:
             while True:
                 if consent is not None:
@@ -503,11 +924,13 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
                         # the child and this guide must exit to release reader
                         # leases; never let imported owner code survive cutover.
                         status = shlex.join([str(cli), "--root", str(paths.root), "host", "update", "status", "--json"])
-                        reconnect = ("The approved managed connection will return at the same address; keep the original browser view open."
+                        reconnect = ("No owner service is enrolled. After DONE, open a fresh authenticated SSH connection to this computer; do not launch again."
+                                     if ssh is not None else
+                                     "The approved managed connection will return at the same address; keep the original browser view open."
                                      if approved.managed_owner else "After DONE, reconnect without another setup: " + shlex.join(service_command(paths.root, cli, config)))
                         return CommandOutput({"state": "launch_handoff", "request_id": retained.launch_id,
                             "config_fingerprint": retained.launch_plan, "generation": approved.generation,
-                            "source_revision": approved.source_revision}, lines=(
+                            "source_revision": approved.source_revision, **carrier}, lines=(
                                 "Original Launch retained. Local owner serving drained; this guide exits so the updater can proceed.",
                                 "Inspect the original operation: " + status,
                                 "If interrupted, continue that same operation locally; do not launch again.",
@@ -525,3 +948,259 @@ def run(args, paths, store, terminal, *, consent=None, profile=None):
                 raise StdioRefused("interrupted_unknown") from None
             return CommandOutput({"state": "serving_stopped"}, lines=("Local foreground serving stopped; shutdown did not change approvals or stop the fleet.",))
         raise CommandFailure("unavailable", "local foreground owner stopped unexpectedly; no server or launch was retried")
+
+
+def _computer_handoff(outcome, ids):
+    """``computer_starting`` for a start under way; ``start_failed`` with core's line for one that stopped."""
+    from .owner_stdio import StdioRefused
+    if ids is None:  # A record gone since it was read: nothing to name.
+        raise StdioRefused("unavailable")
+    if outcome == "starting":
+        return CommandOutput({"state": "computer_starting", "request_id": ids["request_id"],
+                              "config_fingerprint": ids["config_fingerprint"], "target": ids["target"]})
+    if outcome == "failed":
+        raise StdioRefused("start_failed", data={"line": ids["line"], "request_id": ids["request_id"]})
+    raise StdioRefused("unavailable")
+
+
+def _computer_ready(paths, installation, profile, ssh, carrier, consent):
+    """``computer_ready`` once the started computer answers, never from a guide's own child.
+
+    Over SSH nothing listens: the address is the server's own logical key. On
+    Linux the lasting service must answer ``/owner`` on the socket its settings
+    name, for the origin native Tailscale reads for this computer now, within
+    ``READY_SECONDS``; otherwise ``start_failed``.
+    """
+    from ..config import load_host_jobs
+    from ..git_update import read_update
+    from .owner_stdio import StdioRefused
+    if ssh is not None:
+        return CommandOutput({"state": "computer_ready", "origin": _ssh_origin(ssh), **carrier})
+    origin = profile.origin()
+    owner = load_host_jobs()["plane-owner"]
+    socket = owner.get("socket")
+    if owner.get("enroll") is True and owner.get("origin") == origin and isinstance(socket, str):
+        deadline = time.monotonic() + READY_SECONDS
+        while True:
+            consent.check_cancel()
+            if _ready(Path(socket), origin):
+                return CommandOutput({"state": "computer_ready", "origin": origin})
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+    record = read_update(installation)
+    raise StdioRefused("start_failed", data={"line": _NOT_READY,
+                                             "request_id": record["request_id"] if record else None})
+
+
+def _link_claude(paths, store, package, state, *, consent, profile, ssh):
+    """The computer run with the link intent: one link approval for Claude sign-ins on a started computer.
+
+    Reached only when the start carries ``link_claude: true``, after the run's own admission (the
+    guide's ``revision_differs`` against the active source, ``admitted_update``, ``use_full_guide``).
+    It never answers ``computer_ready`` or ``computer_starting``, never refuses ``start_failed`` and
+    sends no pairing or workspace state. These refusals are decided before any card, in this order:
+    ``not_here`` (not Linux, or over SSH: Linux first; a Mac later through this same run),
+    ``not_started``, ``already_linked``, then the sign-in lease probed from this process, whose memory
+    proves nothing (``signin_live``, ``signin_unconfirmed``), ``busy`` (maintenance, or an update in
+    the way), ``credential_present`` (an empty sign-in line in ``.env``) and ``environment_format``
+    (a ``.env`` the sign-in cannot read). Then the started computer's own operator gate; the
+    ``install_provider`` card only when Claude is missing (its own refusals, ``provider_install_*``);
+    the sign-in scope (its own refusal, after the install card when there was one); and the
+    ``link_provider`` card, whose scope is details only; the writer's checks come after its yes.
+    A yes writes the approval (``LinkStore.write``, which checks again inside its transaction) and
+    answers ``link_ready`` with its generation. A no or no answer writes nothing: ``declined`` or
+    ``expired``. Every ending after this run installed Claude that writes no approval (a no, no
+    answer, the scope's refusal, a writer's refusal, a signal or any other failure) is that ending's
+    word prefixed ``installed_`` (``_installed_ending``), so the page can say Claude is installed.
+    """
+    from .operator_context import require_operator_context
+    from .owner_stdio import StdioRefused
+    from ..installation import InstallationError, _check_maintenance
+    from ..plane.owner_access import AccessDenied
+    from ..plane.owner_setup import _linux
+    from ..plane.provider_signin import (LINK_SECONDS, LINK_UNUSED_SECONDS, LinkStore, ProviderSignin,
+        SigninRefused, _names, approved_scope, check_scope, environment_linked, environment_ready,
+        _TERMINAL, held_refusal, signin_running)
+    root = paths.root
+    if ssh is not None or not _linux():
+        raise StdioRefused("not_here")
+    if state != "started":
+        raise StdioRefused("not_started")
+    try:
+        linked = environment_linked(root)
+    except (SigninRefused, OSError):
+        linked = False  # not linked; the .env checks below name what is wrong
+    if linked:
+        raise StdioRefused("already_linked")
+    def current():
+        with store._connection() as conn:
+            return ProviderSignin._current(conn)[0] if "setup_provider" in _names(conn) else None
+    if signin_running(root):
+        refusal = held_refusal(root, current())
+        if refusal == "signin_unconfirmed":
+            # A begin elsewhere may have committed a new attempt since the row was read: decide from a fresh read.
+            fresh = current()
+            if fresh is None or fresh["state"] not in _TERMINAL:
+                refusal = "signin_live"
+        if refusal is not None:
+            raise StdioRefused(refusal)
+    try:
+        _check_maintenance(package.installation, native=True)  # as begin checks it
+    except InstallationError:
+        raise StdioRefused("busy") from None
+    try:
+        environment_ready(root)
+    except SigninRefused as exc:
+        raise StdioRefused("credential_present" if exc.code == "credential_already_present"
+                           else "environment_format") from None
+    except OSError:
+        raise StdioRefused("environment_format") from None
+    require_operator_context(root)  # the started computer's own gate, never a fresh computer's
+    attempted = getattr(profile, "_provider_attempted", False) is True
+    profile.prepare_provider(consent, paths)
+    installed = not attempted and getattr(profile, "_provider_attempted", False) is True  # this run installed Claude
+    try:
+        try:
+            scope = approved_scope(profile.provider, root, str(profile.account))
+        except SigninRefused as exc:
+            raise StdioRefused(exc.code) from None
+        consent.approve("link_provider", {"provider_signin": scope, "source_revision": package.source_revision,
+                                          "unused_seconds": LINK_UNUSED_SECONDS, "seconds": LINK_SECONDS})
+        consent.check_cancel()
+        try:
+            check_scope(scope, root)  # the approved card names what is written
+            approval = LinkStore(store).write(scope)
+        except AccessDenied as exc:
+            raise StdioRefused(exc.code) from None
+    except BaseException as exc:
+        if not installed:
+            raise
+        raise StdioRefused(_installed_ending(exc)) from exc
+    return CommandOutput({"state": "link_ready", "generation": approval.generation})
+
+
+def _installed_ending(exc):
+    """A link run's ending after it installed Claude and wrote no approval: ``installed_`` and the word
+    the run would have ended with otherwise (``owner_stdio.dispatch``'s mapping), within the client's
+    code pattern; ``installed_internal_error`` for anything else."""
+    import re
+    from .owner_stdio import StdioRefused
+    from ..plane.owner_access import AccessDenied, AccessUnavailable
+    if isinstance(exc, StdioRefused) and not exc.data:
+        code = exc.code
+    elif isinstance(exc, CommandFailure):
+        code = exc.error.code
+    elif isinstance(exc, (AccessDenied, AccessUnavailable, OSError, ValueError, ImportError, TimeoutError)):
+        code = "unavailable"
+    elif isinstance(exc, (EOFError, KeyboardInterrupt)):
+        code = "cancelled"  # a signal: interrupted() turns SIGTERM and SIGHUP into KeyboardInterrupt
+    else:
+        code = "internal_error"
+    return "installed_" + (code if isinstance(code, str) and re.fullmatch(r"[a-z0-9_]{1,86}", code) else "internal_error")
+
+
+def run_computer(args, paths, store, *, consent, profile, ssh=None):
+    """The computer run: the cards that add a computer, then its start; and the way back into it.
+
+    By phase 1's ``start_state``: ``other``, or a first-team approval or Launch
+    retained by today's guide, refuses ``use_full_guide`` and writes nothing.
+    ``started`` asks nothing and answers ``computer_ready``. ``starting`` asks
+    nothing and dispatches nothing: it reads the start and answers
+    ``computer_starting`` or ``start_failed``. ``fresh`` asks the folders card,
+    pairing, one storage card and the workspace link, each only if an earlier
+    run has not, drains its own listener, then asks the start card and
+    dispatches. It never waits for the updater and never continues a record:
+    its exit is what lets the updater proceed, so it never answers
+    ``computer_ready`` in the process that dispatched a start. No Claude and no
+    team card is asked without the link intent (``args.link_claude``, only ever
+    ``True``), which goes to ``_link_claude`` instead. ``ssh`` is as for ``run``.
+    """
+    from . import host_owner as console
+    from .owner_setup_consent import admitted_update
+    from .owner_stdio import StdioRefused
+    from ..config import load_host_jobs
+    from ..plane import owner_start
+    from ..plane.owner_service import service_command
+    from ..plane.owner_setup import managed_setup
+    from ..plane.owner_source import start_state
+    if consent is None or profile is None:
+        raise CommandFailure("invalid_argument", "the computer run is the typed guide only")
+    if ssh is not None and profile.runtime is None:
+        raise CommandFailure("invalid_argument", "SSH-controlled setup requires the managed Mac runtime profile")
+    package = managed_setup(paths.root)
+    installation = package.installation
+    # Admission at the installed revision: the profile checked it; the run checks it again.
+    if profile.receipt_revision != package.source_revision:
+        admitted_update(installation, profile.receipt_revision, package.source_revision,
+                        getattr(args, "update_record", None))
+    retained = OwnerSetup(store).retained_state() if os.path.lexists(store.path) else None
+    if retained is not None and (retained.state != "absent" or retained.launch_id is not None):
+        raise StdioRefused("use_full_guide")
+    state = start_state(paths.root, installation)
+    if state == "other":
+        raise StdioRefused("use_full_guide")
+    if getattr(args, "link_claude", False) is True:
+        return _link_claude(paths, store, package, state, consent=consent, profile=profile, ssh=ssh)
+    carrier = {}
+    if ssh is not None:
+        from ..plane.owner_ssh import TRANSPORT
+        carrier = {"transport": TRANSPORT}
+    if state == "started":
+        return _computer_ready(paths, installation, profile, ssh, carrier, consent)
+    if state == "starting":
+        # Core's read-only reader: it asks no card and dispatches nothing, even
+        # when the record is gone by the time it reads.
+        outcome, ids = owner_start._progress(paths.root, installation)
+        if outcome == "started":  # Finished since it was read; this run dispatched nothing.
+            return _computer_ready(paths, installation, profile, ssh, carrier, consent)
+        return _computer_handoff(outcome, ids)
+    typed = {"consent": consent}
+    profile.prepare_directories(consent, paths, **({"ssh_policy": True} if ssh is not None else {}))
+    if ssh is not None:
+        from ..plane.owner_ssh import MAC_TAILSCALE
+        args.origin = _ssh_origin(ssh)  # logical key; never a claim of reachable HTTPS
+        args.tailscale, args.tailscale_socket = MAC_TAILSCALE, ""
+    else:
+        args.origin = profile.origin()
+        args.tailscale, args.tailscale_socket = LINUX_TAILSCALE, ""
+    args.workspace_issuer, args.workspace_origin = _WORKSPACE_ORIGINS
+    args.socket = paths.root / "state/owner/owner.sock"
+    cli = installation.cli
+    config = _serving_configuration(args, paths, None, cli)
+    # On Linux the lasting service's settings; built fresh by every run, so a
+    # run after a failed start never reuses an old plan.
+    plan = _owner_override_plan(paths.root, config) if ssh is None else None
+    if load_host_jobs()["plane-owner"].get("enroll", True) and plan is None:
+        raise CommandFailure("conflict", "configured owner enrollment requires explicit --managed-owner handover")
+    if not os.path.lexists(store.path):
+        console._initialize_first_owner(paths, None, **typed)
+    owner = store.current_grant()
+    if (owner is None or not owner.active) and ssh is not None:
+        consent.state("pairing_ready", origin=config["origin"], **carrier)
+        console._confirm_owner(paths, store, None, **typed)
+    elif owner is None or not owner.active:
+        direct = {**config, "workspace_issuer": None, "workspace_origin": None}
+        command = service_command(paths.root, cli, direct) + ["--bootstrap-pairing-origin", config["workspace_origin"]]
+        with _serving(command, Path(config["socket"]), config["origin"], **typed):
+            consent.state("pairing_ready", origin=config["origin"])
+            console._confirm_owner(paths, store, None, **typed)
+    owner = console._active_owner(store)
+    if store.connected().preparation_state() != "ready":
+        console._initialize_link_storage(store, None, **typed)
+    workspace_state, binding = store.workspace().status()
+    if workspace_state == "absent":
+        with (_ssh_waiting() if ssh is not None else
+              _serving(service_command(paths.root, cli, config), Path(config["socket"]), config["origin"], **typed)):
+            consent.state("workspace_ready", origin=config["origin"], **carrier)
+            console._confirm_workspace(store, None, owner, recover=True, **typed)
+        workspace_state, binding = store.workspace().status()
+    if (workspace_state != "active" or binding.issuer != config["workspace_issuer"]
+            or binding.operational_origin != config["workspace_origin"]):
+        raise CommandFailure("conflict", "retained workspace differs or is inactive; inspect workspace-status; no binding was replaced")
+    # The guide's own listener is drained above; the lasting service may now take the socket.
+    outcome, ids = owner_start.start(paths, store, None, consent=consent, owner_plan=plan,
+                                     directory=profile.units)
+    if outcome == "started":  # Started by another run meanwhile; this one dispatched nothing.
+        raise StdioRefused("unavailable")
+    return _computer_handoff(outcome, ids)

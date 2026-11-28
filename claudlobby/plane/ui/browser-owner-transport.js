@@ -14,7 +14,7 @@ const fields = {
   'action-receipt':['request_id','kind','scope','target','submitted_at'],
   pair:[], 'workspace-challenge':[], 'workspace-stage':['nonce','assertion'],
   'session-challenge':[], 'session-issue':['nonce','assertion'], 'session-status':[], 'session-renew':[], 'session-logout':[],
-  'setup-context':[], 'setup-signin-begin':['generation','attempt_id'], 'setup-signin-status':['generation','attempt_id'],
+  'setup-context':[], 'setup-state':[], 'setup-signin-begin':['generation','attempt_id'], 'setup-signin-status':['generation','attempt_id'],
   'setup-signin-cancel':['generation','attempt_id'], 'setup-signin-code':['generation','attempt_id','code'],
   'setup-preview':['generation','goal'], 'setup-launch':['generation','request_id','config_fingerprint','source_revision'],
   'setup-receipt':['generation','request_id','config_fingerprint','source_revision'],
@@ -24,8 +24,16 @@ const fields = {
   'read-search':['q','fleet','limit'], 'read-grid':['fleet','focus'], 'read-stream':['cursor','once']
 };
 const publicOps = new Set(['pair','workspace-challenge','workspace-stage','session-challenge','session-issue']);
-const sameReference = (a,b) => keys(a,['reference_id','endpoint_origin','revision']) && keys(b,['reference_id','endpoint_origin','revision'])
-  && a.reference_id === b.reference_id && a.endpoint_origin === b.endpoint_origin && a.revision === b.revision;
+// Saved-reference transport: an absent field is the historical HTTPS reference,
+// 'mac_openssh' is an explicit SSH computer, and any other value refuses. The
+// endpoint origin stays the logical authority key either way; for SSH it is not
+// a claim that HTTPS is reachable, and nothing here ever fetches it natively.
+const transports = ['mac_openssh'];
+const referenceShape = value => keys(value,['reference_id','endpoint_origin','revision'])
+  || keys(value,['reference_id','endpoint_origin','revision','transport']) && transports.includes(value.transport);
+const sameReference = (a,b) => referenceShape(a) && referenceShape(b)
+  && a.reference_id === b.reference_id && a.endpoint_origin === b.endpoint_origin && a.revision === b.revision
+  && a.transport === b.transport;
 function hostOrigin(value) {
   try { const url = new URL(value); return url.origin === value && url.protocol === 'https:' && !url.port
     && url.hostname.endsWith('.ts.net') && !url.username && !url.password; } catch { return false; }
@@ -111,7 +119,7 @@ function translate(url, options, target) {
 export function createBrowserOwnerTransport({documentContext, window = globalThis.window,
   nativeFetch = globalThis.fetch.bind(globalThis), selection = ['browser-v1'], now = () => Date.now()/1000,
   setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout} = {}) {
-  let doc = null, channelId = null, sessionId = null, target = null, port = null;
+  let doc = null, channelId = null, sessionId = null, target = null, port = null, bound = null;
   let closed = false, outgoing = 0, incoming = 0, nextID = 0, offerTimer;
   const requests = new Map();
   let resolveReady, rejectReady;
@@ -207,16 +215,17 @@ export function createBrowserOwnerTransport({documentContext, window = globalThi
       || event.ports?.length !== 1) return;
     sessionId=value.sessionId;target={...value.reference,targetHandle:value.targetHandle};port=event.ports[0];
     port.onmessage=receive;port.onmessageerror=dispose;port.start();clearTimeout(offerTimer);
-    try {post('ready');resolveReady();} catch {dispose();}
+    try {post('ready');bound=value.reference.reference_id;resolveReady();} catch {dispose();}
   }
   try {
-    const d=documentContext;
-    if (!keys(d,['version','user_id','workspace_id','context_generation','shell_origin','operational_origin','references','expires_at'])
+    const d=documentContext, base=['version','user_id','workspace_id','context_generation','shell_origin','operational_origin','references','expires_at'];
+    // part_names is presentation for the parts view only (connected-workspace.js checks it); it never reaches the parent.
+    if (!keys(d,base) && !keys(d,[...base,'part_names'])
       || encoder.encode(JSON.stringify(d)).length > 24576
       || d.version !== 1 || d.shell_origin !== SHELL || d.operational_origin !== PLANE || window?.location?.origin !== PLANE
       || !window.parent || window.parent === window || ![d.user_id,d.workspace_id,d.context_generation].every(uuid)
       || !Number.isSafeInteger(d.expires_at) || d.expires_at <= 0 || !Array.isArray(d.references) || d.references.length > 8
-      || d.references.some(r=>!keys(r,['reference_id','endpoint_origin','revision']) || !uuid(r.reference_id)
+      || d.references.some(r=>!referenceShape(r) || !uuid(r.reference_id)
         || !Number.isSafeInteger(r.revision) || r.revision < 1 || typeof r.endpoint_origin !== 'string')
       || new Set(d.references.map(r=>r.reference_id)).size !== d.references.length
       || new Set(d.references.map(r=>r.endpoint_origin)).size !== d.references.length
@@ -249,11 +258,16 @@ export function createBrowserOwnerTransport({documentContext, window = globalThi
         limit:stream?Infinity:request.operation==='action-context'?2*1024*1024:request.operation.startsWith('action-')?32768:request.operation.startsWith('read-')?8*1024*1024:request.operation.startsWith('setup-')?131072:16384};
       active.abort=()=>{if(requests.has(id)) fail(active,true);};requests.set(id,active);
       active.signal?.addEventListener('abort',active.abort,{once:true});
-      active.timer=setTimeout(()=>fail(active,true),['setup-launch','action-send'].includes(request.operation)?45000:request.operation === 'pair'||request.operation.startsWith('workspace-')?35000:15000);
+      active.timer=setTimeout(()=>fail(active,true),['setup-launch','action-send'].includes(request.operation)?45000:request.operation === 'setup-preview'?95000:request.operation === 'pair'||request.operation.startsWith('workspace-')?35000:15000);
       try {post('request',{id,request,credit:4});} catch {dispose();}
     });
   }
-  // Cosmetic integration marker: never an action grant or network authority.
+  // Cosmetic integration markers: never an action grant or network authority.
   Object.defineProperty(fetch,'browserOwnerTransport',{value:true});
+  // The saved reference the parent's offer bound, kept after retirement; null before the offer.
+  // Presentation reads it to show that one computer; every request above still checks the live target.
+  Object.defineProperty(fetch,'browserOwnerReference',{get:() => bound});
+  // Settles, never rejects, once the offer is admitted or the carrier retires without one.
+  Object.defineProperty(fetch,'browserOwnerSettled',{value:ready.then(() => {}, () => {})});
   return Object.freeze({fetch,dispose,ready});
 }

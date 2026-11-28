@@ -1,0 +1,3 @@
+### Fixed — Try again keeps working after a third slow Claude sign-in
+
+One setup approval allowed three Claude sign-in attempts, each with about four and a half minutes to paste the code. After a third sign-in that took too long, the panel said "Trying again needs setup to be recovered on the computer itself." Someone setting up from the website had no way forward. The cap existed because each attempt kept its own copy of the Claude executable (about 350 MiB). Try again now removes the replaced attempt's copy once the new attempt is admitted, so one copy normally remains, and one approval allows ten attempts. If the removal fails, Try again still works. What each attempt sends, and when, is unchanged.

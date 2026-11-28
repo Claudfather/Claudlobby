@@ -450,6 +450,7 @@ test('task result and feedback precede closed history without inventing descript
   const h = harness({jget:()=>response}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
   const html = h.get('task-detail-content').innerHTML;
   assert.ok(html.indexOf('<h3>Recorded result</h3>') < html.indexOf('<h3>Feedback and conversation</h3>'));
+  assert.match(html, /Latest &lt;result&gt; from the recorded completion[\s\S]*<dt>Assigned to<\/dt>[\s\S]*<h3>Feedback and conversation<\/h3>/);
   assert.ok(html.indexOf('id="task-reports"') < html.indexOf('<summary>Task details and history</summary>'));
   assert.ok(html.indexOf('id="task-permissions"') < html.indexOf('<summary>Task details and history</summary>'));
   assert.match(html,/Latest &lt;result&gt; from the recorded completion/);
@@ -463,13 +464,21 @@ test('task result and feedback precede closed history without inventing descript
   assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
 });
 
-test('missing current assignment receipt stays unconfirmed rather than implying delivery', async () => {
-  const response = canonicalDetail('task-a');
-  response.data.task.state = 'active'; response.data.task.current_assignment = {assignee_alias:'Worker'};
-  const h = harness({jget:()=>response}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
-  assert.match(h.get('task-detail-content').innerHTML,/Delivery of the current assignment is not confirmed/);
-  assert.doesNotMatch(h.get('task-detail-content').innerHTML,/No current assignment to check/);
-  assert.match(h.get('task-detail-content').innerHTML,/<h3>Latest recorded update<\/h3>/);
+test('the assigned worker stays visible when delivery has no confirming receipt', async () => {
+  for (const integrity of [null, 'unconfirmed']) {
+    const response = canonicalDetail('task-a');
+    response.data.task.state = 'active';
+    response.data.task.current_assignment = {assignee_alias:'Worker'};
+    response.data.task.delivery = {message_id:'msg_example', integrity};
+    const h = harness({jget:()=>response}); h.loop.setRoom('web'); await settle(); h.open(); await settle();
+    const html = h.get('task-detail-content').innerHTML;
+    assert.match(html, /Assigned to<\/dt><dd>Worker/);
+    assert.ok(html.includes('<dt>Current assignment delivery</dt><dd>'
+      + (integrity || 'Delivery of the current assignment is not confirmed in this view.') + '</dd>'));
+    assert.doesNotMatch(html, /No current assignment to check/);
+    assert.match(html, /<h3>Latest recorded update<\/h3>/);
+    assert.match(html, /<dt>Assigned to<\/dt>[\s\S]*<h3>Latest recorded update<\/h3>/);
+  }
 });
 
 for (const mismatch of [null,'event_id','event','task_id','assignment_id'])
@@ -495,13 +504,39 @@ test('long result is an escaped labelled excerpt with full text in a closed disc
   response.data.task.terminal_event={event:'completed',detail:JSON.stringify({summary})};
   const h=harness({jget:()=>response});h.loop.setRoom('web');await settle();h.open();await settle();
   const html=h.get('task-detail-content').innerHTML;
-  const excerpt=html.slice(html.indexOf('Result excerpt'),html.indexOf('<summary>Read full result</summary>'));
-  assert.match(excerpt,/first 1,000 characters/);assert.match(excerpt,new RegExp('A'.repeat(1000)+'…'));
-  assert.doesNotMatch(excerpt,/full-result-tail/);
-  assert.match(html, new RegExp('A'.repeat(1100)+'&lt;full-result-tail&gt;'));
+  const detail=html.match(/<details class="task-record-details task-result-disclosure"><summary>Read full result<\/summary><pre class="task-record-body task-result">([^<]*)<\/pre><\/details>\s*<div class="task-result-preview">([\s\S]*?)<\/div>/);
+  assert.ok(detail,'place the full result control before its alternate preview');
+  assert.equal(detail[1],'A'.repeat(1100)+'&lt;full-result-tail&gt;');
+  assert.match(detail[2],/Result excerpt \(first 1,000 characters\)/);
+  assert.ok(detail[2].includes('A'.repeat(1000)+'…'));
+  assert.doesNotMatch(detail[2],/full-result-tail/);
   assert.doesNotMatch(html,/<full-result-tail>|<details[^>]*\bopen\b/);
+  const styles=await readFile(new URL('../claudlobby/plane/ui/workspace.css',import.meta.url),'utf8');
+  assert.match(styles,/\.task-result-disclosure\[open\] \+ \.task-result-preview\s*\{\s*display:\s*none;?\s*\}/);
   assert.ok(html.indexOf('Read full result')<html.indexOf('<h3>Feedback and conversation</h3>'));
 });
+
+for (const [state, field, event] of [
+  ['active', 'last_event', 'progress'],
+  ['completed', 'terminal_event', 'completed'],
+]) {
+  test(`the ${state} task preview counts whole visible characters`, async () => {
+    const firstThousand = 'a'.repeat(997) + 'e\u0301🇨🇦👩🏽‍💻';
+    for (const tail of ['', '城', '…']) {
+      const response = canonicalDetail('task-a');
+      const task = response.data.task;
+      task.state = state;
+      task[field] = {event, detail: JSON.stringify({summary: firstThousand + tail})};
+      const h = harness({jget: () => response});
+      h.loop.setRoom('web'); await settle(); h.open(); await settle();
+      const html = h.get('task-detail-content').innerHTML;
+      const preview = [...html.matchAll(/<pre class="task-record-body task-result">([^<]*)<\/pre>/g)].at(-1)[1];
+      assert.equal(preview, firstThousand + (tail ? '…' : ''));
+      assert.equal(html.includes('<summary>Read full '), Boolean(tail));
+      if (tail) assert.ok(html.includes(firstThousand + tail + '</pre>'));
+    }
+  });
+}
 
 test('late detail cannot replace another selected task or reopen a closed dialog', async () => {
   const first=deferred();
@@ -1018,6 +1053,8 @@ test(`manager shortcut composes only an explicit matching granted lead and never
   h.loop.setRoom('web');await settle();
   assert.equal(h.get('work-manager').hidden,authority!=='matching');
   h.loop.setView('tasks');
+  // With the lead known a new message goes to the lead (41-08); this draft is written to the first recipient instead.
+  if(authority==='matching'){assert.equal(h.get('work-recipient').value,lead.id);h.get('work-recipient').value=first.id;h.get('work-recipient').onchange();}
   h.get('work-body').value='First recipient draft';h.get('work-body').emit('input');
   h.get('work-manager').onclick();await settle();
   assert.equal(h.get('work-composer').open,authority==='matching');
@@ -1028,6 +1065,71 @@ test(`manager shortcut composes only an explicit matching granted lead and never
     h.loop.invalidate(undefined,message.scope,'message');assert.equal(h.get('work-manager').hidden,true);
   } else assert.equal(h.get('work-recipient').value,first.id);
   assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+// 41-08: a computer's message context lists its bots by name and marks no lead; the team's task contexts name its lead.
+// A new message goes to that lead, however the answers arrive; with no lead known it goes to the first bot, as before.
+const unmarkedMessage={...context,simulation:false,actions:['message'],recipients:[{id:'engineer',label:'engineer'},
+  {id:ownerNudge.recipients[0].id,label:'lead'},{id:'reviewer',label:'reviewer'}]};
+for(const order of ['message first','lead first','after Check action access'])
+test(`a new message goes to the team's lead by default: ${order}`,async()=>{
+  const lead=ownerNudge.recipients[0].id,message=deferred(),nudge=deferred();
+  let allowed=order!=='after Check action access';
+  const h=harness({interactionContext:()=>allowed?message.promise:null,nudgeContext:()=>allowed?nudge.promise:null});
+  h.loop.setRoom('web');await settle();
+  if(!allowed){
+    assert.equal(h.get('work-form').hidden,true);assert.equal(h.get('work-check-access').hidden,false);
+    allowed=true;h.get('work-check-access').onclick();await settle();
+  }
+  if(order==='lead first'){nudge.resolve(ownerNudge);await settle();}
+  message.resolve(unmarkedMessage);await settle();
+  if(order!=='lead first'){
+    assert.equal(h.get('work-recipient').value,'engineer','before the lead is known: the first bot, as before');
+    nudge.resolve(ownerNudge);await settle();
+  }
+  assert.equal(h.get('work-form').hidden,false);assert.equal(h.get('work-recipient').value,lead);
+  assert.equal(h.get('work-mode-note').textContent,'Direct message to lead. This is not linked to a task.');
+  h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-recipient').value,lead,'an action refresh keeps the lead');
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+// A computer that marks its lead on the message context needs no task grant: the lead is the default from the first paint.
+test('a message-only grant whose context marks the lead addresses a new message to the lead at once',async()=>{
+  const lead=ownerNudge.recipients[0].id,message=deferred();
+  const marked={...unmarkedMessage,recipients:[{id:'engineer',label:'engineer'},{id:lead,label:'manager',lead:true},{id:'reviewer',label:'reviewer'}]};
+  const h=harness({interactionContext:()=>message.promise});
+  h.loop.setRoom('web');await settle();
+  message.resolve(marked);await settle();
+  assert.equal(h.get('work-form').hidden,false);assert.equal(h.get('work-recipient').value,lead,'the first value shown is the lead');
+  assert.match(h.get('work-recipient').innerHTML,/>manager · lead</);
+  h.loop.setRoom('web');await settle();
+  assert.equal(h.get('work-recipient').value,lead,'an action refresh keeps the lead');
+  assert.equal(h.sends.length+h.preparations.length+h.lookups.length,0);
+});
+// A lead bot already named lead is listed once by name; any other lead keeps the mark.
+test('a lead whose name already is lead is not marked lead again in the To list',async()=>{
+  const lead=ownerNudge.recipients[0].id;
+  for(const [label,shown] of [['lead','lead'],['Lead','Lead'],['LEAD','LEAD'],['manager','manager · lead'],['team lead','team lead · lead']]){
+    const marked={...unmarkedMessage,recipients:[{id:'engineer',label:'engineer'},{id:lead,label,lead:true},{id:'reviewer',label:'reviewer'}]};
+    const h=harness({interactionContext:()=>marked});
+    h.loop.setRoom('web');await settle();
+    const options=[...h.get('work-recipient').innerHTML.matchAll(/<option value="([^"]*)">([^<]*)<\/option>/g)].map(m=>[m[1],m[2]]);
+    assert.deepEqual(options,[['engineer','engineer'],[lead,shown],['reviewer','reviewer']],label);
+    assert.equal(h.get('work-recipient').value,lead,`${label}: still the default`);
+  }
+});
+test('a bot the person chose, or a message already written, is not moved when the lead becomes known',async()=>{
+  for(const touch of ['chosen','written']){
+    const nudge=deferred(),h=harness({interactionContext:()=>unmarkedMessage,nudgeContext:()=>nudge.promise});
+    h.loop.setRoom('web');await settle();
+    assert.equal(h.get('work-recipient').value,'engineer',touch);
+    if(touch==='chosen'){h.get('work-recipient').value='reviewer';h.get('work-recipient').onchange();}
+    else{h.get('work-body').value='Hello engineer';h.get('work-body').emit('input');}
+    nudge.resolve(ownerNudge);await settle();
+    assert.equal(h.get('work-recipient').value,touch==='chosen'?'reviewer':'engineer',touch);
+    if(touch==='written')assert.equal(h.get('work-body').value,'Hello engineer');
+    h.loop.setRoom('web');await settle();
+    assert.equal(h.get('work-recipient').value,touch==='chosen'?'reviewer':'engineer',`${touch}: kept across an action refresh`);
+  }
 });
 const feedbackOptions = extra => ({interactionContext:()=>null,feedbackContext:()=>ownerFeedback,protected:true,jget:()=>ownerDetail(),
   crypto:{randomUUID:()=> '22222222-2222-4222-8222-222222222222'},...extra});
@@ -1718,6 +1820,7 @@ const permissionOptions=extra=>({interactionContext:()=>null,permissionContext:(
  crypto:{randomUUID:()=> '11111111-1111-4111-8111-111111111111'},sendAction:permissionReceipt,actionReceipt:permissionReceipt,...extra});
 async function openPermission(h){h.loop.setRoom('web');await settle();h.open(nudgeTaskId);await settle();return h.get('task-permissions');}
 function selectPermission(h,panel,decision){panel.onclick({target:panel.querySelectorAll('[data-permission-decision]').find(b=>b.dataset.permissionDecision===decision)});h.get('permission-decision-reason').value='Owner reason';h.get('permission-decision-reason').oninput();}
+const taskPermissionStatus = h => h.get('task-permission-summary')?.textContent || '';
 
 test('task permission panel requires explicit decision, retains a lost-response UUID and only inspects it after reload',async()=>{
  const storage=store(),h=harness(permissionOptions({storage,sendAction:()=>{throw Error('Lost response');}})),panel=await openPermission(h);
@@ -1727,10 +1830,48 @@ test('task permission panel requires explicit decision, retains a lost-response 
  assert.equal(h.sends.length,1);assert.ok(!storage.getItem('plane.pending-permissions.v1').includes('Owner reason'));
  const restored=harness(permissionOptions({storage})),next=await openPermission(restored);
  assert.ok(next.querySelectorAll('[data-permission-decision]').every(b=>b.disabled));
+ assert.match(taskPermissionStatus(restored), /1 permission request needs review/);
  next.onclick({target:next.querySelectorAll('[data-permission-receipt]')[0]});await settle();
  assert.equal(restored.sends.length,0);assert.equal(restored.lookups.length,1);
  assert.match(next.innerHTML,/Permission is currently approved/);assert.equal(storage.getItem('plane.pending-permissions.v1'),'[]');
+ assert.equal(taskPermissionStatus(restored), '');
  selectPermission(restored,next,'revoke');assert.equal(restored.sends.length,0);
+});
+
+test('a recorded decision updates permission status without clearing incomplete history', async () => {
+  const missing = {permission_id: 'perm_' + '8'.repeat(32), task_id: nudgeTaskId, state: 'unavailable'};
+  const another = {...permissionRecord, permission_id: 'perm_' + '9'.repeat(32), request_event_id: 'ev_' + 'a'.repeat(32)};
+  for (const [has_more, permissions, before, after] of [
+    [false, [permissionRecord], /^1 permission request needs review$/, ''],
+    [false, [permissionRecord, another], /^2 permission requests need review$/, '1 permission request needs review'],
+    [true, [permissionRecord], /At least 1 permission request.*history is incomplete/, 'Permission history is incomplete'],
+    [false, [permissionRecord, missing], /At least 1 permission request.*history is incomplete/, 'Permission history is incomplete'],
+  ]) {
+    const context = {...ownerPermission, permissions, has_more};
+    const h = harness(permissionOptions({permissionContext: () => context}));
+    const panel = await openPermission(h);
+    assert.match(taskPermissionStatus(h), before);
+    selectPermission(h, panel, 'approve');
+    await h.get('permission-decision-form').onsubmit({preventDefault() {}});
+    assert.match(panel.innerHTML, /Permission is currently approved/);
+    assert.equal(taskPermissionStatus(h), after);
+  }
+});
+
+test('an unknown or mismatched decision receipt leaves the pending summary and original request', async () => {
+  for (const outcome of ['unknown', 'mismatched']) {
+    const h = harness(permissionOptions({sendAction: request => {
+      const receipt = permissionReceipt(request);
+      return outcome === 'unknown' ? {...receipt, status: 'unknown', permission: null}
+        : {...receipt, request_id: '22222222-2222-4222-8222-222222222222'};
+    }}));
+    const panel = await openPermission(h);
+    selectPermission(h, panel, 'approve');
+    await h.get('permission-decision-form').onsubmit({preventDefault() {}});
+    assert.match(taskPermissionStatus(h), /1 permission request needs review/);
+    assert.match(panel.innerHTML, /outcome is unconfirmed/i);
+    assert.equal(new ActionState(h.storage, 'plane.pending-permissions.v1').pending[0].request_id, h.sends[0].request_id);
+  }
 });
 
 test('changing task access during permission preparation prevents send; a new task cannot accept the old response',async()=>{
@@ -1739,9 +1880,14 @@ test('changing task access during permission preparation prevents send; a new ta
  h.loop.invalidate(undefined,ownerPermission.scope,'permission');
  const {body,...metadata}=h.preparations[0];preparation.resolve({...metadata,semantic_sha256:'d'.repeat(64)});await submitting;
  assert.equal(h.sends.length,0);assert.match(panel.innerHTML,/Permission access paused/);
- const response=deferred(),j=harness(permissionOptions({sendAction:()=>response.promise})),other=await openPermission(j);
+ const nextTask = {...ownerDetail().data.task, task_id: 'wi_' + 'f'.repeat(32), fleet: 'other', permission_pending: 2};
+ const response=deferred(),j=harness(permissionOptions({sendAction:()=>response.promise,
+   jget: url => url.includes(nudgeTaskId) ? ownerDetail() : {state: 'ok', data: {task: nextTask}}})),other=await openPermission(j);
  selectPermission(j,other,'approve');const sending=j.get('permission-decision-form').onsubmit({preventDefault(){}});await settle();
- j.get('task-detail-close').onclick();await settle();response.resolve(permissionReceipt(j.sends[0]));await sending;
+ j.loop.setRoom('other');await settle();j.open(nextTask.task_id, 'other');await settle();
+ assert.match(taskPermissionStatus(j), /2 permission requests need review/);
+ response.resolve(permissionReceipt(j.sends[0]));await sending;
+ assert.match(taskPermissionStatus(j), /2 permission requests need review/);
  assert.equal(new ActionState(j.storage,'plane.pending-permissions.v1').pending.length,1);
 });
 
@@ -1751,6 +1897,7 @@ test('recorded permission keeps an uncertain notification receipt across reload 
  selectPermission(h,panel,'approve');await h.get('permission-decision-form').onsubmit({preventDefault(){}});
  const original=JSON.parse(storage.getItem('plane.pending-permissions.v1'))[0];
  assert.ok(original.request_id);assert.match(panel.innerHTML,/notification is unconfirmed/);
+ assert.equal(taskPermissionStatus(h), '');
  const approved={...ownerPermission,permissions:[permissionReceipt(h.sends[0]).permission]};
  const restored=harness(permissionOptions({storage,permissionContext:()=>approved,
    actionReceipt:request=>({...permissionReceipt(request),notification:'received'})})),next=await openPermission(restored);
@@ -1912,6 +2059,27 @@ test('permission panel distinguishes explicit denial from unavailable access wit
   }
 });
 
+test('a reader sees pending permission status by the task title as the record changes', async () => {
+  const detail = ownerDetail();
+  const task = detail.data.task;
+  const h = harness(permissionOptions({jget: () => detail, permissionContext: () => { throw actionDenied(); }}));
+  for (const [count, incomplete, expected] of [
+    [1, false, '1 permission request needs review'],
+    [2, true, 'At least 2 permission requests need review. Permission history is incomplete'],
+    [0, true, 'Permission history is incomplete'],
+    [0, false, null],
+  ]) {
+    task.permission_pending = count;
+    task.permission_incomplete = incomplete;
+    const panel = await openPermission(h);
+    assert.match(h.get('task-detail-content').innerHTML, /id="task-permission-summary"[\s\S]*<dl class="task-facts">/);
+    assert.equal(taskPermissionStatus(h), expected || '');
+    assert.equal(h.get('task-permission-summary').hidden, !expected);
+    assert.equal(panel.querySelectorAll('[data-permission-decision]').length, 0);
+  }
+  assert.equal(h.sends.length + h.preparations.length + h.lookups.length, 0);
+});
+
 test('message denial preserves the useful authorized feedback-only path',async()=>{
   const h=harness(feedbackOptions({interactionContext:()=>{throw actionDenied();}}));
   h.loop.setRoom('web');await settle();
@@ -2021,6 +2189,28 @@ test('action access check is disabled during context reads, task reads, writes, 
   const count=reads;h.get('work-check-access').onclick();await settle();assert.equal(reads,count);
 });
 
+test('composer starts folded to its announced summary and comes back from Tasks as the person left it',async()=>{
+  const h=harness();h.loop.setRoom('web');await settle();h.update();
+  const composer=h.get('work-composer');
+  assert.match(h.get('work-loop').innerHTML,/<details id="work-composer"><summary id="work-composer-toggle">/,'a native disclosure, closed in the markup');
+  assert.equal(composer.open,false,'the conversation keeps the screen until the composer is asked for');
+  assert.equal(h.get('work-composer-label').textContent,'Message team');
+  h.loop.setView('tasks');assert.equal(composer.open,false);h.loop.setView('channel');assert.equal(composer.open,false,'folded stays folded');
+  composer.open=true;h.loop.setView('tasks');assert.equal(composer.open,false);
+  h.loop.setView('channel');assert.equal(composer.open,true,'opened before Tasks is open again after it');
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
+test('an opened composer stays open through a room change, an action refresh and an invalidation',async()=>{
+  const h=harness();h.loop.setRoom('north / web');await settle();h.update();
+  const composer=h.get('work-composer');composer.open=true;
+  h.get('work-body').value='Keep this draft';h.get('work-body').emit('input');
+  h.loop.setRoom('north / docs');await settle();h.update();assert.equal(composer.open,true,'room change');
+  h.loop.refreshActions('north');await settle();assert.equal(composer.open,true,'action refresh');
+  h.loop.invalidate();await settle();assert.equal(composer.open,true,'invalidation');
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+
 test('Tasks view keeps one collapsed composer, its draft and receipt IDs across refresh and manual reopening',async()=>{
   const storage=store();saved(storage);const h=harness({storage});h.loop.setRoom('web');await settle();h.update();
   h.get('work-recipient').value='worker';h.get('work-recipient').onchange();
@@ -2081,4 +2271,45 @@ test(`unconfirmed action context offers neutral recovery without diagnosing a mi
   assert.doesNotMatch(note,/grant.*missing|approve.*access/i);
   assert.equal(h.get('work-send').disabled,true);
   assert.equal(h.sends.length,0);
+});
+
+// Document 03: once a team is ready the website's frame shows this message box. Without a message grant it keeps the
+// words it has today and sends nothing.
+test('without message access the message box says Messages: not authorized. and sends nothing',async()=>{
+  const h=harness({interactionContext:()=>{throw actionDenied();},protected:true});
+  h.loop.setRoom('web');await settle();h.update();
+  assert.match(h.get('work-access-status').textContent,/Messages: not authorized\./);
+  assert.equal(h.get('work-mode').textContent,'ACTION NOT AUTHORIZED');
+  assert.equal(h.get('work-form').hidden,true);assert.equal(h.get('work-send').disabled,true);
+  await h.submit();
+  assert.deepEqual([h.sends.length,h.preparations.length,h.lookups.length],[0,0,0]);
+});
+// Merge gate (document 03): the task detail, recipients and saved requests draw bot-written text as plain text. The
+// rooms, check-ins and lists are covered in plane_activity_renderer.test.mjs.
+const HOSTILE='<img src=x onerror=1><a href="https://example.invalid">link</a><form><input></form>';
+const plainText=html=>html.replace(/<[^>]*>/g,' ').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&');
+const tagsOf=html=>[...html.matchAll(/<\/?([a-zA-Z][\w-]*)/g)].map(m=>m[0].toLowerCase());
+async function renderTaskAndComposer(value){
+  const storage=store(),at='2026-01-01T00:00:00Z';
+  const owner={...context,simulation:false,recipients:[{id:'lead',label:value('recipient'),lead:true},{id:'worker',label:value('worker')}]};
+  new ActionState(storage).begin(owner,'message',{recipient:'lead',task_id:null},'Private old message','saved-request');
+  const detail={state:'ok',data:{task:{task_id:nudgeTaskId,fleet:'web',title:value('task title'),state:value('task state'),body:value('task body'),
+    resolved:false,attention_question:value('question'),delivery:{integrity:value('integrity')},
+    current_assignment:{assignee_short:value('assignee'),assignee_uid:'actor_x',state:'active',expected_by:null},
+    last_event:{event:value('last event'),occurred_at:at,detail:JSON.stringify({summary:value('summary')})},
+    assignments:[{assignee_short:value('assignment bot'),assignee_uid:'actor_y',state:value('assignment state'),assigned_by_alias:value('assigned by'),history:[]}],
+    history:[{event:value('history event'),occurred_at:at,actor_short:value('actor'),actor_uid:'actor_z',detail:JSON.stringify({reason:value('event reason')})}],
+    issues:[{code:value('issue code'),blocking:true}]}}};
+  const h=harness({storage,interactionContext:()=>owner,protected:true,jget:()=>detail});
+  h.loop.setRoom('web');await settle();h.update();h.open(nudgeTaskId);await settle();
+  return ['task-detail-content','work-recipient','work-pending'].map(id=>h.get(id).innerHTML).join('\n');
+}
+test('bot-written text in the task detail, recipients and saved requests is drawn as plain text',async()=>{
+  const fields=new Set(),hostile=await renderTaskAndComposer(name=>{fields.add(name);return `${HOSTILE}·${name}`;});
+  const plain=await renderTaskAndComposer(name=>`plain words·${name}`);
+  assert.deepEqual(tagsOf(hostile),tagsOf(plain),'the same elements, whatever the text');
+  assert.doesNotMatch(hostile,/<(?:img|form|input)\b|<a href="https:\/\/example\.invalid"/i);
+  const text=plainText(hostile);
+  assert.equal(fields.size,17);
+  for(const name of fields)assert.ok(text.includes(`${HOSTILE}·${name}`),`${name} is visible as its literal text`);
 });

@@ -83,7 +83,7 @@ def test_prepare_is_nonmutating_and_pins_canonical_queued_null(nudge_http):
     assert app._action_workers == len(app._inflight) == 0
 
 
-def test_context_grants_are_independent_and_message_v1_is_unchanged(nudge_http):
+def test_context_grants_are_independent_and_message_v1_marks_the_same_lead(nudge_http):
     _, client, adapter, _, ctx, options, _ = nudge_http
     access, grant = adapter.access, options['expected_grant']
     nudge = context(client)
@@ -94,6 +94,7 @@ def test_context_grants_are_independent_and_message_v1_is_unchanged(nudge_http):
         actor_uid=ctx.caller.uid, actor_alias=ctx.caller.alias)
     message = post(client, 'context', {'room': 'example'}).json()
     assert message['version'] == 1 and message['actions'] == ['message'] and 'release_id' not in message
+    assert [r for r in message['recipients'] if r.get('lead')] == nudge['recipients'], 'the same lead'
     assert context(client) == nudge
     access.revoke_messages(expected_owner=grant.owner, fleet_uid=ctx.fleet_uid, expected_grant=messages)
     assert context(client) == nudge

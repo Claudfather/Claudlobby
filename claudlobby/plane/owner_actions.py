@@ -77,6 +77,11 @@ class OwnerActions:
         raise AccessDenied("unsupported_owner_action")
 
     def _context(self, reader: VerifiedReader, room: str):
+        context, grant, _ = self._bound_context(reader, room)
+        return context, grant
+
+    def _bound_context(self, reader: VerifiedReader, room: str):
+        """The context, its grant and the one binding snapshot both hashes used."""
         _text(room)
         host = inspect_source(self.root)
         # Session admission precedes configuration/registry access.
@@ -91,7 +96,11 @@ class OwnerActions:
             raise AccessDenied("message_binding_changed")
         check_owner_binding(ctx, host=host, bindings=bindings, grant=grant,
                             refusal="message_binding_changed")
-        recipients = [{"id": actor.uid, "label": name} for name, actor in sorted(ctx.bots.items())]
+        # The team's configured manager, the lead the nudge and feedback contexts name, is marked so a
+        # new message can be addressed to it by default; every declared bot stays a recipient.
+        lead = selected.fleet.manager
+        recipients = [{"id": actor.uid, "label": name, **({"lead": True} if name == lead else {})}
+                      for name, actor in sorted(ctx.bots.items())]
         if not 1 <= len(recipients) <= 100:
             raise AccessUnavailable("owner actions unavailable")
         binding = scope_binding(access, reader, host)
@@ -100,7 +109,7 @@ class OwnerActions:
                 reader.principal.subject, grant.owner.revision, grant.generation,
                 grant.actor_uid, grant.actor_alias], binding))}
         return {"version": 1, "room": room, "scope": scope, "simulation": False,
-                "recipients": recipients, "actions": ["message"]}, grant
+                "recipients": recipients, "actions": ["message"]}, grant, binding
 
     def context(self, reader, payload):
         if type(payload) is dict and "kind" in payload:
@@ -160,7 +169,7 @@ class OwnerActions:
         if action == "send":
             _body(payload["body"])
         room = payload["scope"]["fleet"]
-        context, grant = self._context(reader, room)
+        context, grant, binding = self._bound_context(reader, room)
         if (payload["scope"] != context["scope"] or payload["target"]["recipient"]
                 not in {item["id"] for item in context["recipients"]}):
             raise AccessDenied("action_scope_mismatch")
@@ -168,15 +177,21 @@ class OwnerActions:
         options = dict(fleet=context["room"], fleet_uid=grant.fleet_uid,
             recipient_uid=payload["target"]["recipient"], request_id=payload["request_id"],
             expected_grant=grant)
+        # The connected session that sent it, from the binding its scope was
+        # checked against; a direct session records nothing.
+        provenance = None if binding is None else {
+            "carrier": "connected", "account": binding["binding"]["subject"],
+            "binding_revision": binding["binding"]["revision"]}
         if action == "send":
             self._recheck(reader, context, grant)
-        return fields, context, grant, adapter, options
+        return fields, context, grant, adapter, options, provenance
 
     def operation(self, action, reader, payload):
         if type(payload) is dict and payload.get("kind") in ("nudge", "feedback", "permission"):
             return self._task_action(payload["kind"]).operation(action, reader, payload)
         try:
-            fields, context, grant, adapter, options = self._prepare_operation(action, reader, payload)
+            fields, context, grant, adapter, options, provenance = self._prepare_operation(
+                action, reader, payload)
         except (AccessDenied, AccessUnavailable, OperationContextError) as exc:
             if action == "send":
                 raise ActionNotStarted(exc) from exc
@@ -185,7 +200,7 @@ class OwnerActions:
         if action == "send":
             # Every failure from adapter entry onward is potentially post-effect.
             try:
-                adapter.send(reader, **options, text=payload["body"])
+                adapter.send(reader, **options, text=payload["body"], provenance=provenance)
             except (AccessDenied, AccessUnavailable):
                 raise
             except ReceiptConflict:

@@ -38,6 +38,26 @@ class UpdateError(ValueError):
     """Current operation is unavailable, changed, or not admitted for cutover."""
 
 
+class NotContinuable(UpdateError):
+    """`continue --expected-request` refuses a team preparation that nothing dispatched.
+
+    A Preview, a prepared first team or a prepared addition is dispatched only by
+    its Launch, after the person approved it there.
+    """
+
+
+#: The exit status of `host update continue --expected-request` for NotContinuable.
+NOT_CONTINUABLE_EXIT = 7
+#: How a job run ended, as `job_outcome` records it: it returned, it raised after
+#: entering the update, or it was refused before entering it.
+JOB_RESULTS = ("finished", "unfinished", "refused")
+
+
+def _epoch():
+    """Whole seconds on this computer's clock, for `job_clock` and `job_outcome`."""
+    return int(time.time())
+
+
 class UpdateBusyError(UpdateError):
     """Another coordinator owns the process lock; read-only attachment may succeed."""
 
@@ -257,7 +277,7 @@ def _initialization_scope(value):
     """One explicit first-install scope, readable without the mutable application."""
     if (type(value) is not dict or set(value) != {"directory", "manifests"}
             or not isinstance(value["directory"], str) or type(value["manifests"]) is not list
-            or not value["manifests"] or any(not isinstance(path, str) for path in value["manifests"])):
+            or any(not isinstance(path, str) for path in value["manifests"])):
         raise UpdateError("initialization requires one native directory and exact authored manifests")
     paths = [value["directory"], *value["manifests"]]
     if any(not Path(path).is_absolute() or ".." in Path(path).parts or str(Path(path)) != path
@@ -412,6 +432,15 @@ def _validate(installation, record):
                 or dispatch["state"] not in {"pending", "entered", "finished"}
                 or type(dispatch["attempt"]) is not int or dispatch["attempt"] < 1):
             raise ValueError()
+        clock = record.get("job_clock")
+        if clock is not None and (type(clock) is not dict or not set(clock) <= {"pending_at", "entered_at"}
+                or any(type(value) is not int or value < 0 for value in clock.values())):
+            raise ValueError()
+        outcome = record.get("job_outcome")
+        if outcome is not None and (type(outcome) is not dict or set(outcome) != {"attempt", "at", "result"}
+                or outcome["result"] not in JOB_RESULTS or type(outcome["at"]) is not int or outcome["at"] < 0
+                or type(outcome["attempt"]) is not int or outcome["attempt"] < 1):
+            raise ValueError()
         for name, identity in record["scope"].items():
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,255}", name) or not _SHA.fullmatch(identity):
                 raise ValueError()
@@ -454,6 +483,15 @@ def read_update(installation):
         if isinstance(exc, UpdateError):
             raise
         raise UpdateError("current update record cannot be read") from exc
+
+
+def healthy_done(record):
+    """A finished update that ended cleanly: done, out of maintenance, its configuration
+    committed, no health error and no stage error. Reads only the record it is given."""
+    return (isinstance(record, dict) and record.get("phase") == "done"
+            and type(record.get("health_errors")) is dict and not record["health_errors"]
+            and record.get("maintenance") is False and record.get("config_committed") is True
+            and record.get("stage_error") is None)
 
 
 class UpdateStore:
@@ -1548,6 +1586,9 @@ def _dispatch_update_job(store):
     if observed["state"] not in {"inactive", "failed"}:
         raise UpdateError("independent updater job is not enrolled and inactive")
     record["job_dispatch"] = {"state": "pending", "attempt": 1 if prior is None else prior["attempt"] + 1}
+    # A new dispatch starts its own clock, and no earlier run's outcome speaks for it.
+    record["job_clock"] = {"pending_at": _epoch()}
+    record.pop("job_outcome", None)
     store.save(record)
     return None, (jobs, installation, adapter, directory, record["updater_job"]["target"])
 
@@ -1563,6 +1604,20 @@ def _require_expected_request(record, expected_request_id):
         raise UpdateError("expected request must be one canonical UUID") from exc
     if record is None or record["request_id"] != expected_request_id:
         raise UpdateError(f"original update request {expected_request_id} is no longer current")
+
+
+def team_preparation(record):
+    """A first install that names team files, or an addition: the records a Launch dispatches."""
+    scope = record.get("initialization_scope")
+    return bool(isinstance(scope, dict) and scope.get("manifests")) or record.get("addition_scope") is not None
+
+
+def _require_continuable(record, expected_request_id):
+    """`continue --expected-request`: the named record, and never a team preparation nothing dispatched."""
+    _require_expected_request(record, expected_request_id)
+    if team_preparation(record) and record.get("job_dispatch") is None:
+        raise NotContinuable(f"update request {expected_request_id} is a team preparation that was never "
+                             "dispatched; only its Launch dispatches it")
 
 
 def _prepare_update_locked(store, *, target=None, initialization=None, prepare_only=False, expected_request_id=None, from_prepared_remote=False, convert_sealed=False):
@@ -1593,6 +1648,12 @@ def _prepare_update_locked(store, *, target=None, initialization=None, prepare_o
         raise UpdateError("prepare-only requires an undispatched first-install operation")
     if pending and target is not None and target != record["target"]:
         raise UpdateError("continue the existing frozen target before requesting another")
+    if pending and from_prepared_remote and team_preparation(record) and record.get("job_dispatch") is None:
+        # `host update apply`, under the lock: a Preview or a prepared first team
+        # or addition for this same target is never dispatched by apply. Only its
+        # Launch dispatches it, and a Launch never resolves a prepared remote.
+        raise NotContinuable(f"update request {record['request_id']} is a team preparation that was never "
+                             "dispatched; only its Launch dispatches it")
     if pending and record["phase"] != "prepare" and record.get("job_support") is not None:
         jobs, independent, adapter = _retained_job(store)
         _authorize_retained_operator(store, adapter)
@@ -1642,15 +1703,30 @@ def _apply_or_continue(installation, *, target=None, initialization=None, prepar
             return {"update": record, "dispatch": "nothing_pending"}
         if prepare_only:
             return {"update": record, "dispatch": "prepared"}
-        if record.get("updater_job") is None:
-            jobs, independent, adapter = _prepare_job_support(store)
-            directory = Path(record["native_install_directory"])
-            jobs.prepare_update_job(independent, adapter, directory)
-            jobs.bind_update_job(store, adapter, directory)
-        observed, dispatch = _dispatch_update_job(store)
+        observed, dispatch = _dispatch_locked(store, record)
         dispatched_request_id = record["request_id"]
         if dispatch is None:
             return {"update": store.load(), "job": observed}
+    return _run_dispatched(installation, dispatch, dispatched_request_id)
+
+
+def _dispatch_locked(store, record):
+    """Bind the independent job when it is not yet bound, then freeze one dispatch.
+
+    The caller holds the update lock and runs the returned dispatch only after
+    releasing it.
+    """
+    store._assert_locked()
+    if record.get("updater_job") is None:
+        jobs, independent, adapter = _prepare_job_support(store)
+        directory = Path(record["native_install_directory"])
+        jobs.prepare_update_job(independent, adapter, directory)
+        jobs.bind_update_job(store, adapter, directory)
+    return _dispatch_update_job(store)
+
+
+def _run_dispatched(installation, dispatch, dispatched_request_id):
+    """Start the frozen dispatch with the update lock released."""
     # The native job may acquire update.lock immediately. Never hold it while
     # starting or waiting for the manager's acknowledgement.
     jobs, independent, adapter, directory, native_target = dispatch
@@ -1940,15 +2016,40 @@ def _notify_unfinished(store, failure):
     _notify(store, "this update did not finish", lambda record: _unfinished_text(store.root, record, failure))
 
 
+def _record_outcome(store, *, returned, entered):
+    """Save how this job run ended, with its dispatch finished when it entered: one write.
+
+    The outcome is decided here, by the job itself, and read from the record
+    alone: `finished` when the run returned, `unfinished` when it entered the
+    update and did not return (an interruption included), `refused` when it was
+    refused before entering it. A record with no dispatch gets none: the run
+    spoke for no dispatch.
+    """
+    record = store.load()
+    dispatch = record.get("job_dispatch") if record is not None else None
+    if dispatch is None:
+        return
+    if entered:
+        record["job_dispatch"] = dispatch = {**dispatch, "state": "finished"}
+    record["job_outcome"] = {"attempt": dispatch["attempt"], "at": _epoch(),
+                             "result": "finished" if returned else "unfinished" if entered else "refused"}
+    store.save(record)
+
+
 def _run_native_update(installation):
     """Fixed job entry: kernel membership, then the one resumable coordinator.
 
     A run that leaves the update unfinished posts one notice before it exits, a
     refused run included (#2715), unless the refusal says this process may not
-    be the update's job.
+    be the update's job. A run that has shown it is the job records its outcome
+    first, and a record that cannot be saved never stops the notice or replaces
+    the run's own error.
     """
     with UpdateStore(installation, wait=True) as store:
         failure, speaks, entered = None, True, False
+        # Only a process that has shown it is the job writes an outcome for the
+        # job's dispatch; one refused before that may be a hand-run `_run`.
+        proven, returned = False, False
         try:
             jobs, independent, adapter = _retained_job(store)
             record = store.load()
@@ -1961,25 +2062,34 @@ def _run_native_update(installation):
                 raise UpdateError("independent native job has no retained binding")
             jobs.verify_update_job_runner(independent, adapter, Path(record["native_install_directory"]),
                                           native_target=binding["target"])
-            speaks = True
+            speaks = proven = True
             _check_bound_job(store, jobs, independent, adapter)
             dispatch = record.get("job_dispatch")
             if dispatch is None or dispatch["state"] not in {"pending", "entered", "finished"}:
                 raise UpdateError("native updater lacks its original dispatch intent")
             record["job_dispatch"] = {**dispatch, "state": "entered"}
+            record["job_clock"] = {**record.get("job_clock", {}), "entered_at": _epoch()}
+            # A run again on the same dispatch is not the run that ended before it.
+            record.pop("job_outcome", None)
             store.save(record)
             entered = True
-            return run_prepared_update(store)
+            result = run_prepared_update(store)
+            returned = True
+            return result
         except Exception as exc:
             failure = exc
             raise
         finally:
-            if entered:
-                record = store.load()
-                record["job_dispatch"] = {**record["job_dispatch"], "state": "finished"}
-                store.save(record)
-            if speaks:
-                _notify_unfinished(store, failure)
+            try:
+                if proven:
+                    _record_outcome(store, returned=returned, entered=entered)
+            except Exception as exc:
+                print(f"claudlobby update: this run's outcome was not recorded: {type(exc).__name__}", file=sys.stderr)
+                if returned:
+                    raise
+            finally:
+                if speaks:
+                    _notify_unfinished(store, failure)
 
 
 def main(argv=None):
@@ -2002,11 +2112,16 @@ def main(argv=None):
     parser.add_argument("target", nargs="?")
     parser.add_argument("--convert-sealed", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
+    # Hidden: holds `continue` to the record a client read (the preparation
+    # script's update-continue). Without it `continue` is unchanged.
+    parser.add_argument("--expected-request", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if Path(args.root) != installation.data_root:
         raise UpdateError("updater data root differs from the recorded installation")
     if (args.convert_sealed or args.prepare_only) and (args.action != "apply" or not (args.convert_sealed and args.prepare_only)):
         raise UpdateError("conversion preview requires apply --convert-sealed --prepare-only")
+    if args.expected_request is not None and args.action != "continue":
+        raise UpdateError("an expected request is accepted only by continue")
     if args.action in {"status", "recovery"}:
         if args.target is not None:
             raise UpdateError("read-only update inspection takes no target")
@@ -2018,9 +2133,14 @@ def main(argv=None):
             raise UpdateError("apply accepts only an optional full Git commit")
         if args.action == "continue" and args.target is not None:
             raise UpdateError("continue uses the existing frozen target")
+        held = {}
+        if args.expected_request is not None:
+            # Before any dispatch; apply_or_continue holds the same id under its lock.
+            _require_continuable(read_update(installation), args.expected_request)
+            held = {"expected_request_id": args.expected_request}
         result = apply_or_continue(installation, target=args.target,
                                    from_prepared_remote=args.action == "apply",
-                                   convert_sealed=args.convert_sealed, prepare_only=args.prepare_only)
+                                   convert_sealed=args.convert_sealed, prepare_only=args.prepare_only, **held)
     print(json.dumps(result, sort_keys=True))
     return 0
 
@@ -2028,6 +2148,9 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         sys.exit(main())
+    except NotContinuable as exc:
+        print(f"claudlobby update: {exc}", file=sys.stderr)
+        sys.exit(NOT_CONTINUABLE_EXIT)
     except (UpdateError, OSError, ValueError) as exc:
         print(f"claudlobby update: {exc}", file=sys.stderr)
         sys.exit(6)

@@ -266,3 +266,79 @@ def test_reload_fleet_updates_plugins_through_the_staged_link(tmp_path):
     calls = (tmp_path / "calls.log").read_text().splitlines()
     assert "staged plugin update somepkg@Somewhere" in calls, calls
     assert not [c for c in calls if c.startswith("claude plugin")], calls
+
+
+# --- a browser installation launches its pinned provider -------------------------------
+# Website setup installs ONE reviewed, hash-checked Claude executable at
+# ~/.local/share/claudlobby-browser/provider-bin/claude (provider_install.py) and
+# puts no claude on that account's PATH, so a bare `claude` exits 127 in every
+# pane. The family is recognised by the exact context its units carry, the same
+# pair the managed Mac tools use: CLAUDLOBBY_ROOT is the family's data/ and
+# CLAUDLOBBY_INSTALLATION its install/.
+
+
+def _family(tmp_path):
+    home = tmp_path / "home"
+    family = home / ".local/share/claudlobby-browser"
+    (family / "provider-bin").mkdir(parents=True)
+    return home, family
+
+
+def _family_env(home, family, **extra):
+    return {
+        "HOME": home,
+        "CLAUDLOBBY_ROOT": family / "data",
+        "CLAUDLOBBY_INSTALLATION": family / "install",
+        **extra,
+    }
+
+
+def test_a_browser_installation_launches_its_pinned_provider(tmp_path):
+    home, family = _family(tmp_path)
+    pinned = family / "provider-bin" / "claude"
+    _write_exec(pinned, "#!/bin/bash\necho 2.1.325\n")
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    _write_exec(decoy / "claude", "#!/bin/bash\necho decoy\n")
+    env = _family_env(home, family, PATH=f"{decoy}:{os.environ['PATH']}")
+    assert _resolve(**env) == str(pinned)
+    # Where a pane would look a bare name up, a claude is found; the pin wins.
+    r = _bash(f'fleet_claude_path "{decoy}"', **env)
+    assert r.stdout == str(pinned), r.stderr
+
+
+def test_a_missing_pin_is_still_the_answer_never_a_claude_from_path(tmp_path):
+    # Launching the absent pin fails loudly; some other claude would run unverified.
+    home, family = _family(tmp_path)
+    assert _resolve(**_family_env(home, family)) == str(
+        family / "provider-bin" / "claude"
+    )
+
+
+def test_the_pin_outranks_a_staged_link_and_claude_bin_outranks_the_pin(tmp_path):
+    home, family = _family(tmp_path)
+    root = family / "data"
+    (root / "state" / "bin").mkdir(parents=True)
+    _staged(tmp_path, root)
+    pinned = family / "provider-bin" / "claude"
+    _write_exec(pinned, "#!/bin/bash\necho pinned\n")
+    assert _resolve(**_family_env(home, family)) == str(pinned)
+    assert (
+        _resolve(**_family_env(home, family, CLAUDE_BIN="/opt/pinned/claude"))
+        == "/opt/pinned/claude"
+    )
+
+
+@pytest.mark.parametrize("drift", ["root", "installation", "home"])
+def test_only_the_exact_browser_context_selects_the_pin(tmp_path, drift):
+    # A terminal installation resolves exactly what it did before.
+    home, family = _family(tmp_path)
+    _write_exec(family / "provider-bin" / "claude", "#!/bin/bash\n")
+    env = _family_env(home, family)
+    if drift == "root":
+        env["CLAUDLOBBY_ROOT"] = tmp_path / "terminal-root"
+    elif drift == "installation":
+        env["CLAUDLOBBY_INSTALLATION"] = tmp_path / "terminal-install"
+    else:
+        env["HOME"] = tmp_path / "another-home"
+    assert _resolve(**env) == "claude"

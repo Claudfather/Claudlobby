@@ -37,7 +37,11 @@ SRC_ROOT="$CLAUDLOBBY_ROOT"
 FLEET=envcascade-rehearsal
 BOT=canary
 PREFIX=com.envcascade.rehearsal
-WORK="$(mktemp -d)"
+# A work folder that cannot be made ends the run here. With WORK empty the
+# export went into /root and /home, and the exit trap ran pkill -f "/bin/claude".
+# shellcheck source=harness/scratch-dir.sh
+. "$(dirname "${BASH_SOURCE[0]}")/scratch-dir.sh" || exit 3
+scratch_dir WORK
 EXPORT_ROOT="$WORK/root"
 FAKE_HOME="$WORK/home"
 PASS=0; FAIL=0
@@ -68,7 +72,7 @@ cleanup() {
     # accumulating across runs ("left-over process ... in control group").
     pkill -f "start-bot.sh $BOT_DIR" >/dev/null 2>&1 || true
     pkill -f "$WORK/bin/claude" >/dev/null 2>&1 || true
-    rm -rf "$WORK"
+    scratch_remove "$WORK"
 }
 trap cleanup EXIT
 

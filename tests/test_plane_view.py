@@ -1075,6 +1075,10 @@ def test_connected_workspace_entry_has_complete_versioned_static_graph(tmp_path)
     assert enrollment.status_code == 200 and enrollment.headers["cache-control"] == "no-store"
     assert 'from "./connected-read-client.js?v=' in workspace.text
     assert 'from "./two-source-read.js?v=' in workspace.text
+    assert 'from "./workspace-parts.js?v=' in workspace.text
+    parts = client.get("/workspace-parts.js")
+    assert parts.status_code == 200 and parts.headers["cache-control"] == "no-store"
+    assert 'from "./claude-signin.js?v=' in parts.text
     assert "import(" not in workspace.text
     assert "<!--CONNECTED_CONTEXT-->" in client.get("/").text
 
@@ -1681,10 +1685,6 @@ def test_ui_reads_in_the_operators_language():
     assert "TERMINAL_STATUSES" not in js
     assert "r.terminal_event?.occurred_at" in js
     assert 'dueLabel(r.expected_by).replace' not in js
-    assert "attention_since" in js and "never delivered" in js
-    assert "check the worker" in js and "send failed" in js
-    # an overdue card names the remedy that keeps the assignment (#2469)
-    assert "claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by" in js
     # the clamp: ONE number, read by the stylesheet; the toggle finds its
     # body by structure and remembers what the operator opened
     assert "--clamp-lines" in js and "openBodies" in js

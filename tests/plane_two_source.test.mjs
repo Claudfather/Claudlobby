@@ -364,7 +364,7 @@ test('only core admitted read handles; distinct hosts; no action or mutation cap
   const a = await source('a','a'), b = await source('b','a');
   assert.throws(() => createTwoSourceReadTransport({ sources: [a,b] }), /independently/);
   const { api, a: x } = await pair();
-  assert.deepEqual(Object.keys(api).sort(), ['createEventSource','dispose','jget','retryOverview','roomLabel','routeRoom']);
+  assert.deepEqual(Object.keys(api).sort(), ['createEventSource','dispose','jget','presentationChanged','retryOverview','roomLabel','routeRoom']);
   for (const path of ['/api/owner/actions/send','/api/tasks?fleet=unregistered','/api/channel?limit=999','/api/tasks?fleet=a%20%2F%20team&fleet=b','https://wrong/api/tasks','/api/inventory']) assert.notEqual((await api.jget(path)).state, 'ok');
   assert.ok(x.calls.every(c => !c.opts.method || c.opts.method === 'GET'));
 });
@@ -637,7 +637,7 @@ async function appHarness(api) {
   Object.assign(c,{createEventSource:api.createEventSource,pushDebugRow(){}});
   runInNewContext(app.slice(app.indexOf('let refreshTimer = null;'),app.indexOf('$("debug-toggle")')),c);
   const settle=async()=>{await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));};
-  return {c,paints,timers,callbacks,overviewPaints,summaries,nodes,settle,
+  return {app,c,paints,timers,callbacks,overviewPaints,summaries,nodes,settle,
     advance:ms=>{now+=ms;},
     async refresh(){now+=60000;await c.refreshBoards();await settle();}};
 }
@@ -863,13 +863,19 @@ test('slow overview does not block activity and stream traffic respects its minu
   assert.equal(a.calls.filter(c=>c.url==='/api/overview').length,2);
   api.dispose();
 });
+async function roomSwitchHarness(api) {
+  const h = await appHarness(api);
+  const {runInNewContext} = await import('node:vm');
+  const {app} = h;
+  Object.assign(h.c, {closeEquipment(){}, savePick(){}, currentView:'overview', $:()=>({hidden:true})});
+  runInNewContext(app.slice(app.indexOf('function pickFleet('), app.indexOf('let agentPresence =')), h.c);
+  h.c.fleetsSeen = true;
+  h.c.currentFleet = 'all';
+  return h;
+}
+
 test('fleet selection immediately retires the held board before the queued new-room refresh',async()=>{
-  const {api,a,b}=await pair(),h=await appHarness(api);
-  const {runInNewContext}=await import('node:vm');
-  const app=await readFile(new URL('../claudlobby/plane/ui/app.js',import.meta.url),'utf8');
-  Object.assign(h.c,{closeEquipment(){},savePick(){},currentView:'overview',$:()=>({hidden:true})});
-  runInNewContext(app.slice(app.indexOf('function pickFleet('),app.indexOf('let agentPresence =')),h.c);
-  h.c.fleetsSeen=true;h.c.currentFleet='all';
+  const {api,a,b}=await pair(), h=await roomSwitchHarness(api);
   const held=deferred();for(const source of [a,b])source.routes.set('/api/channel?limit=120',held.promise);
   const reading=h.c.refreshBoards();await new Promise(r=>setImmediate(r));
   assert.equal(h.paints.length,1,'the available task panel paints before selection changes');
@@ -886,6 +892,34 @@ test('fleet selection immediately retires the held board before the queued new-r
   assert.equal(h.paints.length,beforeRetirement.length+2,'only the queued new-room panels add paints');
   api.dispose();
 });
+
+test('a fleet pick drops the final reply from a partial task read', {timeout: 3000}, async () => {
+  const {api, a, b} = await pair(), h = await roomSwitchHarness(api);
+  const held = deferred(), partial = deferred(), calls = [];
+  const ready = ok({tasks:[{task_id:wi, fleet:'team', title:'Ready task'}]});
+  a.routes.set('/api/tasks', ready);
+  a.routes.set('/api/tasks?fleet=team', ready);
+  b.routes.set('/api/tasks', held.promise);
+  h.c.acceptTaskPoll = (env, settled) => {
+    calls.push(env);
+    if (!settled) partial.resolve();
+    return env;
+  };
+  const reading = h.c.refreshBoards();
+  await partial.promise;
+  const [first] = calls;
+  assert.equal(first.data.sources.find(s => s.key === 'b').state, 'checking');
+  h.c.pickFleet('a / team');
+  held.resolve(ok({tasks:[{task_id:wi, fleet:'team', title:'Retired task'}]}));
+  await reading;
+  assert.deepEqual(calls, [first], 'the old room cannot paint its final reply');
+  h.callbacks.filter(x => x.ms === 400).at(-1).cb();
+  await h.settle();
+  assert.notEqual(calls.at(-1), first);
+  assert.deepEqual(Array.from(calls.at(-1).data.tasks, task => task.task_id), ['a::' + wi]);
+  api.dispose();
+});
+
 test('disconnect retires held overview and fast summary before either can repaint',async()=>{
   const {api}=await pair(),overview=deferred(),summary=deferred();
   const h=await appHarness({...api,jget:path=>path==='/api/overview'?overview.promise:path==='/api/summary'?summary.promise:api.jget(path)});
@@ -1040,7 +1074,7 @@ test('workspace transport accepts one to eight distinct core-issued handles; old
     assert.throws(()=>createWorkspaceReadTransport({sources}));
   assert.throws(()=>createTwoSourceReadTransport({sources:[a]}),/Exactly two/);
   const api=createWorkspaceReadTransport({sources:[a]});
-  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget','retryOverview','roomLabel','routeRoom']);
+  assert.deepEqual(Object.keys(api).sort(),['createEventSource','dispose','jget','presentationChanged','retryOverview','roomLabel','routeRoom']);
   assert.notEqual((await api.jget('/api/owner/actions/context')).state,'ok');
   assert.notEqual((await api.jget('/api/owner/actions/send')).state,'ok');
   assert.ok(a.calls.every(c=>!c.opts.method||c.opts.method==='GET'));
@@ -1271,7 +1305,7 @@ test('held old one-source detail cannot paint private bytes after disposal or co
 // public demo's root adapter, or create a second owner-handle module instance.
 test('canonical module graph stays inside its release directory', async () => {
   const files = ['app.js', 'panel-state.js', 'api-client.js', 'browser-owner-transport.js', 'work-loop.js', 'permission-panel.js',
-    'action-state.js', 'connected-actions.js', 'owner-api-client.js', 'two-source-read.js', 'connected-read-client.js', 'connected-workspace.js', 'workspace-enrollment.js', 'workspace-display.js', 'guided-setup.js'];
+    'action-state.js', 'connected-actions.js', 'owner-api-client.js', 'two-source-read.js', 'connected-read-client.js', 'connected-workspace.js', 'workspace-enrollment.js', 'workspace-display.js', 'guided-setup.js', 'claude-signin.js', 'workspace-parts.js'];
   for (const prefix of ['https://plane.example.test/', 'https://plane.example.test/connected-assets/release/']) {
     for (const name of files) {
       const source = await readFile(new URL('../claudlobby/plane/ui/' + name, import.meta.url), 'utf8');
@@ -1437,4 +1471,34 @@ test('generic workspace admits eight independent sources, refuses nine, and scop
     assert.ok(result.data.threads.every(t=>!t.work_item_id.startsWith('h7::')));
     assert.equal(api.routeRoom('h0 / team').key,'h0');
   } finally { api.dispose();rows.forEach(row=>row.reader.dispose()); }
+});
+
+test('a source the entry does not show is left out of aggregate facts, coverage and blocker text; admission is unchanged',async()=>{
+  const rows=await Promise.all(['a','b','c'].map(n=>source(n,n)));let only=null;
+  assert.throws(()=>createWorkspaceReadTransport({sources:[{...rows[0],shown:true}]}),/core read handle/);
+  const api=createWorkspaceReadTransport({sources:rows.map(row=>({...row,shown:()=>only===null||only===row.key}))});
+  const stream=api.createEventSource('/api/stream'),events=[];stream.onmessage=e=>events.push(JSON.parse(e.data));
+  try {
+    assert.deepEqual((await api.jget('/api/overview')).data.coverage,{total:3,reachable:3,partial:false},'every source is shown by default');
+    only='a';
+    for(const path of ['/api/overview','/api/fleets','/api/tasks','/api/channel?limit=120']) {
+      const value=await api.jget(path);
+      assert.deepEqual(value.data.sources.map(s=>s.key),['a'],path);
+      assert.deepEqual(value.data.windows.map(w=>w.source),['a'],path);
+      assert.deepEqual(value.data.coverage,{total:1,reachable:1,partial:false},path);
+    }
+    assert.deepEqual((await api.jget('/api/fleets')).data.fleets.map(f=>f.alias),['a / team']);
+    assert.equal(api.routeRoom('b / team').key,'b','routing and admission of a hidden source are unchanged');
+    for(const row of rows){row.setStatus('sign_in_required');await row.reader.start();}
+    const blocked=await api.jget('/api/tasks');
+    assert.equal(blocked.state,'unavailable');assert.match(blocked.remediation,/^a: /);
+    assert.doesNotMatch(blocked.remediation,/(?:^| )[bc]: /,'blocker text names only the shown computer');
+    assert.deepEqual((await api.jget('/api/overview')).data.sources.map(s=>s.key),['a']);
+    const pushed=events.length;api.presentationChanged();
+    assert.equal(events.length,pushed+1);assert.equal(events.at(-1).coverage_changed,true);
+    assert.deepEqual(events.at(-1).overview.data.sources.map(s=>s.key),['a'],'the pushed summary uses the same presentation');
+    only='nobody';
+    assert.equal((await api.jget('/api/tasks')).data.coverage.total,3,'with nothing shown every source is presented');
+  } finally { api.dispose();rows.forEach(row=>row.reader.dispose()); }
+  const after=events.length;api.presentationChanged();assert.equal(events.length,after,'a disposed transport pushes nothing');
 });

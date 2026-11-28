@@ -6,7 +6,13 @@
 # full retained {account,uid,gid,home,node_key,profile_id} only for a new inspect.
 # apply: exact original full selection, digest and decision=approve; no edited plan.
 # status: original minimal selection, UUID and artifact pin; never derives context.
-# UUIDs are permanently one-shot, including unknowns.
+# A UUID past planned is permanently one-shot, unknowns included. A planned
+# record past expiry may be removed: its id then answers original_receipt_absent
+# and a new inspect proposes afresh, so an old approval binds only an identical
+# digest (else proposal_conflict) and no effect can replay.
+# The team account claudlobby is adopted when it conforms, or, absent, a system
+# proposal plans one fixed useradd that the worker runs once, before apt. Its
+# id must be the next id this leaf computes. Other accounts are unchanged.
 # Trust entry: authenticated root transport must pin these exact bytes in a
 # root-owned, non-user-writable regular file before invoking this bundle.
 # Private worker/hook additionally require the retained fixed artifact/receipt.
@@ -27,6 +33,7 @@ import time
 import uuid
 import stat
 import pwd
+import grp
 import hashlib
 import fcntl
 import socket
@@ -57,6 +64,18 @@ DISCLOSURE = ("Native apt resolves, downloads, verifies and installs the exact l
     "or restart services. Earlier hooks may execute even if our verifier refuses. Local "
     "conffiles are kept with --force-confdef and --force-confold. Selected-user lingering may "
     "start that accounts enabled user services. No automatic repair, rollback or replay.")
+TEAM = "claudlobby"
+TEAM_HOME = "/home/claudlobby"
+TEAM_DISCLOSURE = ("Creates or uses the local account claudlobby: its own group only, folder /home/claudlobby "
+    "that only it can open, shell /bin/bash, locked password, no expiry, no subordinate IDs. Setup adds it "
+    "to no other group and writes no sudo rule. Lingering starts its user services at boot. Anyone your "
+    "Tailscale access controls let sign in to this computer as a non-root account can also sign in as "
+    "claudlobby. Setup never removes this account.")
+# Fixed root paths the team account checks read; nothing on the wire moves them.
+PATHS = {"passwd": "/etc/passwd", "group": "/etc/group", "shadow": "/etc/shadow", "subuid": "/etc/subuid",
+         "subgid": "/etc/subgid", "nsswitch": "/etc/nsswitch.conf", "home": TEAM_HOME, "gshadow": "/etc/gshadow",
+         "sudoers": "/etc/sudoers", "sudoers.d": "/etc/sudoers.d",
+         "mail": "/var/mail/" + TEAM, "proc": "/proc", "run": "/run/user"}
 
 
 class Refusal(Exception):
@@ -320,26 +339,39 @@ def api_get(api, endpoint):
 
 def derive_selection(selected, api):
     validate_selection(selected)
-    account = pwd.getpwnam(selected["account"])
-    require(account.pw_name == selected["account"] and account.pw_uid == selected["uid"]
-            and account.pw_uid > 0 and account.pw_shell in ("/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/zsh", "/bin/zsh"), "account_changed")
+    # An absent team account has the ids it will be made with: gid = uid.
+    planned = selected["account"] == TEAM and lookup(pwd.getpwnam, TEAM) is None
+    if planned:
+        gid, home = selected["uid"], TEAM_HOME
+    else:
+        if selected["account"] == TEAM:
+            team_policy()  # a present team account is used only when it conforms
+        account = pwd.getpwnam(selected["account"])
+        require(account.pw_name == selected["account"] and account.pw_uid == selected["uid"]
+                and account.pw_uid > 0 and account.pw_shell in ("/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/zsh", "/bin/zsh"), "account_changed")
+        gid, home = account.pw_gid, account.pw_dir
     _, profile = api_get(api, "profiles/current")
     require(type(profile) is dict, "node_or_profile_changed")
-    derived = {**selected, "gid": account.pw_gid, "home": account.pw_dir, "profile_id": profile.get("ID")}
+    derived = {**selected, "gid": gid, "home": home, "profile_id": profile.get("ID")}
     validate_selection(derived, full=True)
     # Existing full binding owns native OS/account/node/profile/daemon policy.
     # Inspect repeats it while constructing the retained proposal.
-    binding(derived, api)
+    binding(derived, api, True) if planned else binding(derived, api)
     return derived
 
 
-def binding(selection, api):
+def binding(selection, api, planned=False):
     require(os.geteuid() == 0 and platform.system() == "Linux" and platform.machine() in ("x86_64", "aarch64"), "unsupported_root_profile")
     os_release = Path("/etc/os-release").read_text()
     require(re.search(r"^ID=ubuntu$", os_release, re.M) and re.search(r"^VERSION_ID=\"24.04\"$", os_release, re.M), "unsupported_os")
-    account = pwd.getpwnam(selection["account"])
-    require((account.pw_uid, account.pw_gid, account.pw_dir) == (selection["uid"], selection["gid"], selection["home"])
-            and account.pw_shell in ("/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/zsh", "/bin/zsh"), "account_changed")
+    if planned and selection["account"] == TEAM and lookup(pwd.getpwnam, TEAM) is None:
+        # Planned: the worker makes it with exactly these ids. The output is
+        # the same, so bindings before and after useradd compare equal.
+        require((selection["gid"], selection["home"]) == (selection["uid"], TEAM_HOME), "account_changed")
+    else:
+        account = pwd.getpwnam(selection["account"])
+        require((account.pw_uid, account.pw_gid, account.pw_dir) == (selection["uid"], selection["gid"], selection["home"])
+                and account.pw_shell in ("/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/zsh", "/bin/zsh"), "account_changed")
     _, status = api_get(api, "status")
     daemon = dict(getattr(api, "identity", {}))
     _, profile = api_get(api, "profiles/current")
@@ -571,8 +603,238 @@ def ingress_after(old, dns, home):
     return value
 
 
+def lookup(function, key):
+    try:
+        return function(key)
+    except KeyError:
+        return None
+
+
+def lstat(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def read_root(name, limit=65536, child=""):
+    # One fixed root file, or a child listed in a fixed root folder, at most
+    # limit + 1 bytes so callers see oversize; None when it is absent. Never
+    # follows a link.
+    path = Path(PATHS[name], child)
+    trusted_parents(path)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == OWNER and not info.st_mode & 0o022, "unsafe_file")
+        raw = b""
+        while len(raw) <= limit:
+            part = os.read(fd, limit + 1 - len(raw))
+            if not part:
+                break
+            raw += part
+        return raw
+    finally:
+        os.close(fd)
+
+
+def next_uid(passwd, group):
+    # The readiness probe next-uid rule, byte for byte, held to it by
+    # tests/fixtures/next-uid-rule.json: lines split on newline only; passwd
+    # fields 3 and 4 and group field 3 count when they are 1-10 ASCII digits;
+    # each file is at most 64 KiB and 512 lines. 1 + the highest id from 1000
+    # to 59999, at least 1000; None past 59999. Unreadable refuses.
+    highest = 999
+    for raw, indexes in ((passwd, (2, 3)), (group, (2,))):
+        require(raw is not None, "team_uid_changed")
+        lines = raw.split(b"\n")
+        if lines[-1] == b"":
+            lines.pop()
+        require(len(raw) <= 65536 and len(lines) <= 512, "team_uid_changed")
+        for line in lines:
+            fields = line.split(b":")
+            for index in indexes:
+                if index < len(fields) and re.fullmatch(rb"[0-9]+", fields[index]):
+                    require(len(fields[index]) <= 10, "team_uid_changed")
+                    value = int(fields[index].lstrip(b"0") or b"0")
+                    if 1000 <= value <= 59999:
+                        highest = max(highest, value)
+    return highest + 1 if highest < 59999 else None
+
+
+def directory_service():
+    # Accounts, passwords, groups and sudo rules come from local files only.
+    # Read as glibc 2.39 does: # is no comment, a name ends at a colon or a
+    # space, and names are exact (sudo alone reads its line in any case).
+    # Every line for these must parse and list only files or systemd, with no
+    # [action]; a later line replaces an earlier one, so this holds whichever
+    # wins.
+    raw = read_root("nsswitch")
+    require(raw is not None and len(raw) <= 65536, "team_directory_service")
+    seen, names = set(), (b"passwd", b"group", b"shadow", b"gshadow", b"initgroups", b"sudoers")
+    for line in raw.split(b"\n"):
+        text = line.strip()
+        text = text.lower() if text.lower().startswith(b"sudoers") else text
+        if text.startswith(names):
+            entry = re.fullmatch(rb"([a-z]+)[\s:]+(.*)", text)
+            require(entry and entry[1] in names and entry[2] and set(entry[2].split()) <= {b"files", b"systemd"},
+                    "team_directory_service")
+            seen.add(entry[1])
+    require(seen >= {b"group", b"passwd"}, "team_directory_service")
+
+
+def subordinate(uid):
+    # A subuid or subgid line for the team or its id, or a range holding it.
+    for name in ("subuid", "subgid"):
+        raw = read_root(name)
+        if raw is None:
+            continue
+        if len(raw) > 65536:
+            return True
+        for line in raw.split(b"\n"):
+            fields = line.split(b":")
+            if fields[0] in (TEAM.encode(), str(uid).encode()):
+                return True
+            if (len(fields) == 3 and all(re.fullmatch(rb"[0-9]{1,10}", field) for field in fields[1:])
+                    and int(fields[1]) <= uid < int(fields[1]) + int(fields[2])):
+                return True
+    return False
+
+
+def running(uid):
+    # Any process with this id as a real, effective, saved or file uid or gid.
+    wanted = str(uid).encode()
+    for pid in os.listdir(PATHS["proc"]):
+        if not re.fullmatch(r"[0-9]+", pid):
+            continue
+        try:
+            with open(os.path.join(PATHS["proc"], pid, "status"), "rb") as stream:
+                text = stream.read(65536)
+        except OSError:
+            continue  # it exited
+        if any(line.split()[:1] in ([b"Uid:"], [b"Gid:"]) and wanted in line.split()[1:] for line in text.split(b"\n")):
+            return True
+    return False
+
+
+def team_lines(name):
+    # The lines of a shadow file whose first field is the team, split on
+    # colons; [] when the file is absent, None past LIMIT.
+    raw = read_root(name, LIMIT)
+    if raw is None or len(raw) <= LIMIT:
+        return [f for f in (line.split(b":") for line in (raw or b"").split(b"\n")) if f[0] == TEAM.encode()]
+
+
+def sudo_rules(code):
+    # A heuristic: no line sudo reads names the team as a word, in any case,
+    # comments included (to sudo, # before digits is a uid), with continued
+    # lines joined, once its \xHH and \ escapes are undone. Aliases, groups,
+    # #uid forms or sudo.conf can still hide it, so the live run also checks
+    # sudo -l -U claudlobby.
+    # Every include must be /etc/sudoers.d, whose files are read as sudo picks
+    # them (no name ending in ~ or holding a dot), at most 64 of 64 KiB.
+    try:
+        names = sorted(n for n in os.listdir(PATHS["sudoers.d"]) if not n.endswith("~") and "." not in n)
+    except FileNotFoundError:
+        names = []
+    require(len(names) <= 64, code)
+    for name, child in [("sudoers", "")] + [("sudoers.d", n) for n in names]:
+        raw = read_root(name, child=child) or b""
+        # No NUL (sudo ends a line there), no last \ (sudo carries it into the
+        # next file), and any include line exactly the one allowed.
+        require(len(raw) <= 65536 and b"\0" not in raw and not re.search(rb"\\\s*\Z", raw), code)
+        for line in raw.split(b"\n"):
+            include = re.match(rb"[\s!]*@include|\s*#include(?:dir)?\s", line)
+            require(not include or re.fullmatch(rb"\s*[#@]include(?:dir)?\s+/etc/sudoers\.d\s*", line), code)
+        text = raw + b"\n" + re.sub(rb"\\[ \t]*\r?\n[ \t]*", b"", raw)
+        text = re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m[1], 16)]), text).replace(b"\\", b"")
+        require(not re.search(rb"\bclaudlobby\b", text, re.I), code)
+
+
+def team_policy():
+    # A present team account is used only as useradd below makes it.
+    directory_service()
+    account = pwd.getpwnam(TEAM)
+    uid, gid = account.pw_uid, account.pw_gid
+    users = pwd.getpwall()
+    require(1000 <= uid <= 59999 and [p.pw_name for p in users if p.pw_uid == uid or p.pw_name == TEAM] == [TEAM], "team_account_uid")
+    group = lookup(grp.getgrgid, gid)
+    require(gid == uid and group is not None and group.gr_name == TEAM and not group.gr_mem
+            and [p.pw_name for p in users if p.pw_gid == gid] == [TEAM]
+            and [g.gr_name for g in grp.getgrall() if g.gr_gid == gid or g.gr_name == TEAM] == [TEAM]
+            and set(os.getgrouplist(TEAM, gid)) == {gid}, "team_account_group")
+    # Its gshadow line names no administrator or member and holds no hash. A
+    # missing line conforms: newgrp then uses the /etc/group field, held here
+    # to x, empty or a lock, none of which any password matches.
+    lines = team_lines("gshadow")
+    require(lines is not None and len(lines) <= 1 and re.fullmatch(r"x|[!*]*", group.gr_passwd)
+            and all(len(f) == 4 and re.fullmatch(rb"[!*]*", f[1]) and f[2] == f[3] == b"" for f in lines), "team_account_group")
+    require(account.pw_shell == "/bin/bash", "team_account_shell")
+    trusted_parents(Path(PATHS["home"]))
+    home, mail = lstat(PATHS["home"]), lstat(PATHS["mail"])
+    require(account.pw_dir == TEAM_HOME and home is not None and stat.S_ISDIR(home.st_mode) and home.st_uid == uid
+            and not home.st_mode & 0o077 and (mail is None or stat.S_ISREG(mail.st_mode) and mail.st_uid == uid
+            and mail.st_size == 0 and mail.st_nlink == 1), "team_account_home")
+    lines = team_lines("shadow")
+    require(lines and len(lines) == 1 and len(lines[0]) == 9
+            and account.pw_passwd == "x" and re.fullmatch(rb"[!*]+", lines[0][1]), "team_account_password")
+    # No forced change (a last change of 0 by value: only empty or digits
+    # above 0 pass), no maximum age, no inactivity limit, no expiry.
+    require(re.fullmatch(rb"(0*[1-9][0-9]*)?", lines[0][2]) and all(lines[0][i] in (b"", b"-1") for i in (4, 6, 7)), "team_account_expiry")
+    require(not subordinate(uid), "team_account_ids")
+    sudo_rules("team_account_sudo")
+
+
+def team_plan(uid, api):
+    # The team account is absent: plan it with the id the check offered,
+    # which must be the next id this leaf computes, and free everywhere.
+    directory_service()
+    require(lookup(grp.getgrnam, TEAM) is None and team_lines("gshadow") == [], "team_leftovers")
+    trusted_parents(Path(PATHS["home"]))
+    require(lstat(PATHS["home"]) is None, "team_home_exists")
+    require(uid == next_uid(read_root("passwd"), read_root("group"))
+            and lookup(pwd.getpwuid, uid) is None and lookup(grp.getgrgid, uid) is None, "team_uid_changed")
+    require(not subordinate(uid) and lstat(PATHS["mail"]) is None, "team_leftovers")
+    sudo_rules("team_leftovers")
+    require(not running(uid) and unit_state("user@" + str(uid) + ".service").get("ActiveState") == "inactive"
+            and lstat(os.path.join(PATHS["run"], str(uid))) is None, "team_uid_unavailable")
+    # Never made beside another setup that already holds port 443.
+    _, served = api_get(api, "serve-config")
+    served = {} if served is None else served
+    require(type(served) is dict and all(type(served.get(key) or {}) is dict for key in ("TCP", "Web")), "unknown_serve_schema")
+    require("443" not in (served.get("TCP") or {}) and not any(key.endswith(":443") for key in served.get("Web") or {}), "occupied_443")
+
+
+def team_block(selection, kind, api):
+    # The proposal login block: exactly these six keys (settled at W1 review).
+    present = lookup(pwd.getpwnam, TEAM) is not None
+    if present:
+        team_policy()
+    else:
+        require(kind != "ingress", "account_changed")
+        if kind == "system":
+            team_plan(selection["uid"], api)
+    return {"account": TEAM, "uid": selection["uid"], "gid": selection["gid"], "home": TEAM_HOME,
+            "shell": "/bin/bash", "state": "present" if present else "create"}
+
+
+def team_state():
+    try:
+        if lookup(pwd.getpwnam, TEAM) is None:
+            return "absent"
+        team_policy()
+        return "conforming"
+    except Exception:
+        return "unexpected"
+
+
 def inspect_plan(kind, selection, api):
-    bound = binding(selection, api)
+    team = selection["account"] == TEAM
+    bound = binding(selection, api, True) if team else binding(selection, api)
+    login = team_block(selection, kind, api) if team else None
     if kind == "ingress":
         etag, before = api_get(api, "serve-config")
         require(type(etag) is str and 0 < len(etag) <= 256 and "\r" not in etag and "\n" not in etag, "missing_etag")
@@ -585,7 +847,10 @@ def inspect_plan(kind, selection, api):
         package_health()
         return {"kind": kind, "binding": bound, "manager": manager, "apt": apt_configuration(),
                 "disclosure": "Explicit apt-get update changes package indices and executes configured apt update hooks. It does not install packages."}
-    return {"kind": kind, "binding": bound, "packages": package_plan(), "manager": manager, "disclosure": DISCLOSURE}
+    plan = {"kind": kind, "binding": bound, "packages": package_plan(), "manager": manager, "disclosure": DISCLOSURE}
+    if team:
+        plan.update(login=login, disclosure=DISCLOSURE + " " + TEAM_DISCLOSURE)
+    return plan
 
 
 def observe(record, api):
@@ -622,6 +887,8 @@ def observe(record, api):
             package_health(); result["package_health"] = "clean"
         except Exception:
             result["package_health"] = "unknown"
+    if "login" in record["proposal"]:
+        result["team_account"] = team_state()  # conforming, absent or unexpected
     return result
 
 
@@ -656,6 +923,17 @@ def no_pending(api=None):
         absent_admitted = (record["state"] in TERMINAL or not same_boot) and unit.get("LoadState") == "not-found" and unit.get("ActiveState") == "inactive" and unit.get("MainPID") == "0"
         require(loaded_inactive or absent_admitted, "prior_operation_not_inactive")
         package_health()  # a new ingress UUID cannot bypass dirty prior packages
+
+
+def prune():
+    # Receipt hygiene before a new record is saved: remove planned receipts
+    # past their expiry, which can never be applied. Every other state stays.
+    # load reads through the store checks and never follows a link.
+    for path in STORE.iterdir():
+        if path.name.endswith(".json") and valid_uuid(path.name[:-5]):
+            record = load(path.name[:-5])
+            if record["state"] == "planned" and type(record.get("expires_at")) is int and time.time() > record["expires_at"]:
+                os.unlink(path)
 
 
 def execute(verb, value, source, api):
@@ -693,14 +971,21 @@ def execute(verb, value, source, api):
                 "artifact_sha256": value["artifact_sha256"], "proposal": proposal, "digest": digest(proposal),
                 "created_at": int(time.time()), "expires_at": int(time.time()) + TTL, "state": "planned"}
             require(len(canonical(record)) <= RECORD_BUDGET, "proposal_oversize")
-            save(record); return record
+            prune(); save(record); return record
         require(record["digest"] == value["digest"] and value["decision"] == "approve", "proposal_conflict")
         if record["state"] != "planned":
             return {"record": record, "observation": observe(record, api)}
         require(time.time() <= record["expires_at"], "proposal_expired")
         no_pending(api)
         verify_artifact(artifact_path(record["artifact_sha256"]), record["artifact_sha256"])
-        require(inspect_plan(record["proposal"]["kind"], record["selection"], api) == record["proposal"], "proposal_changed")
+        try:
+            current = inspect_plan(record["proposal"]["kind"], record["selection"], api)
+        except Refusal as exc:
+            # After approval, a team account refusal means the computer changed.
+            require(not exc.code.startswith("team_") and (exc.code != "occupied_443"
+                    or record["proposal"]["kind"] != "system"), "proposal_changed")
+            raise
+        require(current == record["proposal"], "proposal_changed")
         if record["proposal"].get("no_op"):
             record["state"] = "completed"; record["effect"] = "none_existing_exact_route"
             save(record); return record
@@ -786,13 +1071,28 @@ def private_worker(request_id, source, api):
     rc = None
     try:
         require(record["dispatch"]["boot_id"] == boot_id(), "worker_boot_changed")
-        require(binding(record["selection"], api) == record["proposal"]["binding"], "binding_changed")
+        team = record["selection"]["account"] == TEAM
+        require((binding(record["selection"], api, True) if team else binding(record["selection"], api))
+                == record["proposal"]["binding"], "binding_changed")
         if record["proposal"]["kind"] == "index-refresh":
             require(inspect_plan("index-refresh", record["selection"], api) == record["proposal"], "proposal_changed")
             rc = native(apt_base() + ["update"], effect=True)
         else:
             packages = record["proposal"]["packages"]
             require(package_plan() == packages and manager_plan(record["selection"]) == record["proposal"]["manager"], "proposal_changed")
+            if team:
+                login = team_block(record["selection"], "system", api)
+                require(login == record["proposal"].get("login"), "proposal_changed")
+                if login["state"] == "create":
+                    # The one account effect, once and before apt: fixed
+                    # arguments, and the uid team_block just held to the
+                    # next id this leaf computes from the same files.
+                    rc = native(["/usr/sbin/useradd", "--uid", str(login["uid"]), "--user-group", "--create-home",
+                        "--home-dir", TEAM_HOME, "--shell", "/bin/bash", "--comment", "Claudlobby team",
+                        "--expiredate", "", "--inactive", "-1", "--key", "HOME_MODE=0700", "--key", "SUB_UID_COUNT=0",
+                        "--key", "SUB_GID_COUNT=0", "--key", "PASS_MAX_DAYS=-1", "--", TEAM], effect=True)
+                    require(rc == 0, "useradd_failed")
+                    team_policy()
             if packages["actions"]:
                 hook = str(source) + " _hook " + request_id
                 # apt selects Tools options by executable name (first hook token).

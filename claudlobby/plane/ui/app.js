@@ -10,9 +10,10 @@
 // only presentation labels. The first version's copied vocabularies already
 // disagreed live with the SQL reducer.
 
-import { esc, ago, renderState, stateBlock } from "./panel-state.js";
+import { clip, esc, ago, renderState, stateBlock } from "./panel-state.js";
 import { jget, createEventSource } from "./api-client.js";
 import * as interactionApi from "./api-client.js";
+import { taskPermissionSummary } from "./permission-panel.js";
 import { mountWorkLoop, conversationTaskLink } from "./work-loop.js";
 import { hiddenTeams, setTeamHidden, fleetStatusCopy, aggregateFleetStatusCopy, connectionLabel } from "./workspace-display.js";
 
@@ -113,7 +114,6 @@ function dueLabel(iso) {
   return s >= 0 ? `due in ${unit}` : `overdue ${unit}`;
 }
 
-const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + "…" : s);
 
 function latestTx(msg) {
   return msg.tx && msg.tx.length ? msg.tx[msg.tx.length - 1] : null;
@@ -258,7 +258,7 @@ function bodyBlock(m, prose = null) {
                 + `${open ? "show less" : "show more"}</button>` : "") + reportEvidence(report);
   }
   return `<div class="body redacted">message captured as metadata only`
-       + ` (${m.body_bytes} bytes${m.truncated ? ", truncated" : ""})</div>`;
+       + ` (${esc(m.body_bytes)} bytes${m.truncated ? ", truncated" : ""})</div>`;
 }
 
 function machineryBlock(m, prose = null) {
@@ -267,7 +267,7 @@ function machineryBlock(m, prose = null) {
     `msg ${esc(m.msg_id)}`,
     m.work_item_id ? `work item ${esc(m.work_item_id)}` : "",
     m.assignment_id ? `assignment ${esc(m.assignment_id)}` : "",
-    `seq ${m.ingest_seq}`,
+    `seq ${esc(m.ingest_seq)}`,
     t ? `tx ${esc(t.event)} via ${esc(t.carrier)}#${t.attempt_no}` : "",
     `class ${esc(m.message_class)}`,
     `sender ${esc(m.sender_alias)}`,
@@ -522,17 +522,12 @@ function renderChannel(env) {
 // printed "overdue due in 5m" whenever the two clocks disagreed (fold F7).
 // A reducer blocker is rendered separately by taskIssueNote.
 //
-// Each arm dates itself from the server instant that arm is ABOUT: the two
-// send arms from `attention_since` (the dispatch), the deadline arm from the
-// deadline — which is the same field when overdue is the only arm, and the
-// right one when it rides behind a failed send — and the two HUMAN arms
-// (chunk M-A, #1481) from the instant the human acted, which the server
-// already put in `attention_since` for them.
+// A card has one attention timestamp. A delivery warning can sit behind an
+// escalation, so it has no independent send or queue time to display.
 const WHY = {
   permission_pending: (r) => [
-    `${r.permission_pending} permission request${r.permission_pending === 1 ? "" : "s"} need${r.permission_pending === 1 ? "s" : ""} review`,
-    "open this task to review the exact action, target and limits"],
-  permission_unavailable: () => [
+    taskPermissionSummary(r), "open the task for its status"],
+  permission_unavailable: (r) => r.permission_incomplete && r.attention_reason.includes("permission_pending") ? null : [
     "permission history is incomplete",
     "open this task to inspect permission status; more requests may need a decision"],
   escalated: (r) => [
@@ -540,14 +535,8 @@ const WHY = {
       ? `needs you: ${r.attention_question}`
       : "needs you — the question was not recorded",
     `asked by ${r.attention_by || "the manager"} ${ago(r.attention_since)}`],
-  send_failed: (r) => [`send failed ${ago(r.attention_since)}`,
-                       "inspect the task and message receipt before an explicit delivery retry;"
-                       + " withdraw with claudlobby --json task withdraw TASK_ID"
-                       + " --reason TEXT --request-id UUID"],
-  never_activated: (r) => [`queued ${ago(r.attention_since)}, never delivered`,
-                           "check the worker and message receipt before an explicit delivery retry;"
-                           + " reassign with claudlobby --json task reassign TASK_ID"
-                           + " --bot BOT --reason TEXT --request-id UUID"],
+  send_failed: () => ["The send attempt failed", "Open the task to see who is assigned."],
+  never_activated: () => ["The send attempt is unconfirmed", "Open the task to check its recorded delivery status."],
   // the nudge's own reason, when the operator gave one and the capture kept
   // it: "why did somebody poke this" is the first thing the reader asks, and
   // the server already stamps it for the leading arm (fold F10)
@@ -557,20 +546,16 @@ const WHY = {
                   "the manager should inspect the task, then reassign, withdraw, or escalate"],
   // the deadline in force: a manager's move (#2469) is read, not the dispatch's
   overdue: (r) => [`overdue ${ago(r.current_assignment?.expected_by || r.attention_since)}`,
-                   "check the worker; if it waits on something outside the worker, move its deadline"
-                   + " with claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by"
-                   + " RFC3339|none --reason TEXT --request-id UUID; to give it to another bot,"
-                   + " reassign with claudlobby --json task reassign TASK_ID"
-                   + " --bot BOT --reason TEXT --request-id UUID"],
+                   "Check the deadline and latest update in the task."],
   // chunk U — a bot that REPORTED it is blocked and waiting: its newest task
   // event is `blocked_waiting` (non-terminal; the task stays open until the
   // block clears and the worker records progress or completion). `attention_since`
   // is when it blocked. Leads a stale row,
   // which excludes it — so an aged block reads this, never "no progress".
   blocked_waiting: (r) => [
-    `blocked, waiting on you since ${ago(r.attention_since)}`,
-    "resolve the blocker, then the worker records claudlobby --json assignment"
-      + " progress ASSIGNMENT_ID --summary TEXT --request-id UUID, or completes it"],
+    r.attention_reason[0] === "blocked_waiting" && r.attention_since
+      ? `Work paused ${ago(r.attention_since)}` : "Work paused",
+    "Open the task to read the latest update."],
   // chunk T — a task the bot is HOLDING but not moving on: open, delivered,
   // aging, no progress, and (the crux) the assignee is not working right now.
   // Tiered by age; `stale_tier` (amber|red) makes the card read louder as it
@@ -583,9 +568,11 @@ const WHY = {
 
 function attentionWhy(r) {
   if (!r.attention) return "";
-  const parts = (r.attention_reason || []).filter((k) => WHY[k]).map((k) => {
-    const [reason, fix] = WHY[k](r);
-    return `${esc(reason)} — <small>${esc(fix)}</small>`;
+  const parts = (r.attention_reason || []).flatMap((k) => {
+    const description = WHY[k]?.(r);
+    if (!description) return [];
+    const [reason, fix] = description;
+    return [`${esc(reason)} — <small>${esc(fix)}</small>`];
   });
   if (!parts.length) return "";
   return `<div class="why">⚠ ${parts.join(" · ")}</div>`;
@@ -620,6 +607,20 @@ function groupBy(rows, keyOf) {
   return out;
 }
 
+const assignmentRecovery = [
+  {reasons: ["send_failed"], label: "Withdraw the task", command: "claudlobby --json task withdraw TASK_ID --reason TEXT --request-id UUID"},
+  {reasons: ["overdue"], label: "Change the deadline", command: "claudlobby --json assignment reschedule ASSIGNMENT_ID --expected-by RFC3339|none --reason TEXT --request-id UUID"},
+  {reasons: ["never_activated", "overdue"], label: "Reassign the task", command: "claudlobby --json task reassign TASK_ID --bot BOT --reason TEXT --request-id UUID"},
+];
+
+function assignmentCommands(reasons) {
+  if (!Array.isArray(reasons) || !reasons.length) return "";
+  const receipt = reasons.includes("send_failed") || reasons.includes("never_activated")
+    ? '<div class="note">Check the original message receipt before retrying delivery.</div>' : "";
+  return receipt + assignmentRecovery.filter(action => action.reasons.some(reason => reasons.includes(reason)))
+    .map(({label, command}) => `<div class="note">${esc(label)}: <code>${esc(command)}</code></div>`).join("");
+}
+
 function taskIssueNote(r) {
   if (r.resolved) return "";
   const codes = (r.issues || []).filter((x) => x.blocking).map((x) => x.code);
@@ -641,21 +642,24 @@ function refreshTaskHistory() {
   clearTaskHistory();
   void refreshBoards();
 }
-function acceptTaskPoll(env, settled = true) {
+function acceptTaskPoll(env, settled = true, recordState) {
   if (taskHistoryHeld) {
     if (!settled) return taskSnapshot;
     if (env?.state === "ok" && taskWindowIdentity(env) === taskWindowIdentity(taskSnapshot)) return taskSnapshot;
     taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
   }
-  renderTasks(env);
+  renderTasks(env, settled, recordState);
   return env;
+}
+function canLoadOlderTasks(data) {
+  return data?.task_page?.version === 1 && Boolean(data.task_page.next_cursor);
 }
 function paintTaskHistory(env) {
   const more = $("task-load-older"), refresh = $("task-refresh"), count = $("task-history-count");
   const data = env?.state === "ok" ? env.data : null;
   const unsupported = data?.task_page?.unavailable || data?.truncated && data?.task_page?.version !== 1;
   if (more) {
-    more.hidden = data?.task_page?.version !== 1 || !data?.task_page?.next_cursor;
+    more.hidden = !canLoadOlderTasks(data);
     more.disabled = taskHistoryBusy;
     more.textContent = taskHistoryBusy ? "Loading older work…" : "Load older work";
     more.onclick = loadOlderTasks;
@@ -663,7 +667,7 @@ function paintTaskHistory(env) {
   if (refresh) { refresh.disabled = taskHistoryBusy; refresh.onclick = refreshTaskHistory; }
   if (count) {
     count.hidden = !data;
-    count.textContent = data ? `${data.tasks.length} loaded task records. `
+    count.textContent = data ? `${data.tasks.length} ${data.tasks.length === 1 ? "task" : "tasks"} loaded. `
       + (data.coverage?.partial || data.truncated || data.task_page?.unavailable ? "History coverage is incomplete. " : "Reached the oldest recorded work in the selected sources. ")
       + (unsupported ? "A source needs an update to load older work. " : "")
       + (taskHistoryHeld ? "Browsing loaded history; Refresh tasks returns to newest records. " : "") + taskHistoryNotice : "";
@@ -671,7 +675,7 @@ function paintTaskHistory(env) {
 }
 async function loadOlderTasks() {
   const previous = taskSnapshot, token = previous?.data?.task_page?.next_cursor;
-  if (!token || previous.data.task_page.version !== 1 || taskHistoryBusy
+  if (!canLoadOlderTasks(previous?.data) || taskHistoryBusy
       || typeof sessionPaused !== "undefined" && sessionPaused) return;
   taskHistoryHeld = taskHistoryBusy = true; taskHistoryNotice = "";
   const version = ++taskHistoryVersion, room = currentFleet, session = sessionEpoch;
@@ -708,6 +712,9 @@ function taskAssigneeKey(task) {
 function resetTaskFilters() {
   taskHistoryHeld = taskHistoryBusy = false; taskHistoryVersion++; taskHistoryNotice = "";
   taskFilters = {status:"",assignee:""}; taskSnapshot = null;
+  for (const rail of [$("attention"), $("tasks")]) {
+    for (const summary of openTaskSummaries(rail)) summary.parentElement.open = false;
+  }
   paintTaskFilters([],false);
   paintTaskHistory(null);
 }
@@ -736,27 +743,59 @@ function paintTaskFilters(rows, available) {
   assignee.onchange = () => { taskFilters.assignee = assignee.value; repaint(); };
   reset.onclick = () => { taskFilters = {status:"",assignee:""}; repaint(); };
 }
-function renderTasks(env) {
+function openTaskSummaries(rail) {
+  return rail?.querySelectorAll?.(".task-record[open] > summary[data-task-record]") || [];
+}
+function renderTasks(env, settled = true, recordState) {
   const attEl = $("attention"), taskEl = $("tasks"), badge = $("attn-count");
-  taskSnapshot = env?.state === "ok" ? env : null;
-  paintTaskHistory(env);
-  paintTaskFilters(env?.state === "ok" ? env.data.tasks : [],env?.state === "ok");
+  const rails = [attEl, taskEl];
+  const ok = env?.state === "ok";
+  const carried = recordState?.version === taskHistoryVersion ? recordState : null;
+  const sameBoard = taskSnapshot || carried;
+  const expanded = new Set(carried?.expanded);
+  if (taskSnapshot) {
+    for (const rail of rails) {
+      for (const summary of openTaskSummaries(rail)) expanded.add(summary.dataset.taskRecord);
+    }
+  }
+  const recordKey = (fleet, id) => JSON.stringify([fleet || "", id]);
   const focused = document.activeElement;
-  const focusedRail = [attEl, taskEl].find(el => el.contains?.(focused));
-  const identity = focusedRail && focused?.dataset?.taskOpen
-    ? {id:focused.dataset.taskOpen, fleet:focused.dataset.taskFleet || ""} : null;
+  const focusedRail = rails.find(el => el.contains?.(focused));
+  const summaryKey = (focusedRail && focused?.dataset?.taskRecord) || (carried?.rail === focused ? carried?.focus : null);
+  const identity = summaryKey || (focusedRail && focused?.dataset?.taskOpen
+    ? recordKey(focused.dataset.taskFleet, focused.dataset.taskOpen) : null);
+
+  // One aggregate read draws checking sources as they settle. Carry only keys
+  // for those sources. Every displayed task still comes from the current reply.
+  const checking = settled ? [] : (env?.data?.sources || []).filter(s => s.state === "checking").map(s => s.key + "::");
+  const sourceStillChecking = key => {
+    if (!checking.length) return false;
+    const [, taskId] = JSON.parse(key);
+    return typeof taskId === "string" && checking.some(prefix => taskId.startsWith(prefix));
+  };
+  if (recordState) {
+    recordState.version = taskHistoryVersion;
+    recordState.expanded = [...expanded].filter(sourceStillChecking);
+    recordState.focus = recordState.rail = null;
+  }
+  taskSnapshot = ok ? env : null;
+  paintTaskHistory(env);
+  paintTaskFilters(ok ? env.data.tasks : [], ok);
   const restoreFocus = () => {
-    if (!identity) return; // A board refresh never takes focus from elsewhere.
+    if (!identity) return;
     const available = el => el?.isConnected && !el.hidden && !el.disabled && !el.closest("[hidden]");
-    const replacement = [attEl, taskEl].flatMap(el => [...el.querySelectorAll("[data-task-open]")])
-      .find(button => button.dataset.taskOpen === identity.id
-        && (button.dataset.taskFleet || "") === identity.fleet && available(button));
-    const destination = replacement || [focusedRail, attEl, taskEl].find(available);
+    const button = rails.flatMap(el => [...el.querySelectorAll("[data-task-open]")])
+      .find(button => recordKey(button.dataset.taskFleet, button.dataset.taskOpen) === identity && available(button));
+    const replacement = summaryKey ? sameBoard && button?.parentElement.querySelector(".task-record > summary") : button;
+    const destination = replacement || [focusedRail, ...rails].find(available);
     if (!destination) return;
-    if (!replacement) destination.tabIndex = -1;
+    if (!replacement) {
+      destination.tabIndex = -1;
+      if (summaryKey && recordState && sourceStillChecking(summaryKey)) { recordState.focus = summaryKey; recordState.rail = destination; }
+    }
     destination.focus();
   };
-  const coverage = env?.state === "ok" ? env.data?.coverage : null;
+  const coverage = ok ? env.data?.coverage : null;
   const partial = coverage?.partial === true;
   if (renderState(taskEl, env,
                   { idleWhenEmpty: (d) => !taskFilters.status && !taskFilters.assignee && !partial && !d.tasks.length && !d.issue_count && !d.truncated })) {
@@ -774,7 +813,10 @@ function renderTasks(env) {
   const filterCount = $("task-filter-count");
   if (filterCount) {
     filterCount.hidden = !filtered;
-    filterCount.textContent = filtered ? `${visible.length} of ${rows.length} loaded task records match. Attention count is unfiltered and covers loaded records.` : "";
+    const summary = !visible.length && canLoadOlderTasks(env.data)
+      ? `0 of ${rows.length} match. Choose Load older work to keep looking.`
+      : `${visible.length} of ${rows.length} loaded task records match.`;
+    filterCount.textContent = filtered ? summary + " Filters don’t change the attention count for loaded tasks." : "";
   }
   const issueCount = env.data.issue_count || 0;
   badge.hidden = !attn.length && !issueCount && !env.data.truncated && !partial;
@@ -800,19 +842,20 @@ function renderTasks(env) {
     const priorCount = r.assignment_count - (a ? 1 : 0);
     const prior = priorCount > 0
       ? `<div class="note">${priorCount} prior assignment(s)</div>` : "";
+    const key = recordKey(r.fleet, r.task_id);
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
       <button class="task-open" type="button" data-task-open="${esc(r.task_id)}" data-task-fleet="${esc(r.fleet || "")}">${esc(clip(r.title || "", 160) || "Untitled task")}</button>
       <div class="sub">${esc(who)}`
       + `${when ? ` · ${esc(when)}` : ""}</div>`
-      + `<details class="task-record"><summary>Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}</details>`
+      + `<details class="task-record"${expanded.has(key) ? " open" : ""}><summary data-task-record="${esc(key)}">Record details</summary><div>task ${esc(r.task_id)}</div>${delivery}${lastAct}${prior}${assignmentCommands(r.attention_reason)}</details>`
       + taskIssueNote(r) + attentionWhy(r) + nudgeNote(r)
       + `</div>`;
   };
   const limited = env.data.truncated
-    ? `<div class="card attn"><div class="why">⚠ ${taskHistoryHeld ? 'Showing loaded task history' : `Showing the newest ${env.data.limit || 200} tasks`}. Older work may still need attention.</div></div>` : "";
+    ? `<div class="card attn"><div class="why">⚠ ${taskHistoryHeld ? 'Showing loaded task history' : `Showing the newest ${esc(env.data.limit || 200)} tasks`}. Older work may still need attention.</div></div>` : "";
   const issues = issueCount
-    ? `<div class="card attn"><div class="why">⚠ ${issueCount} task-history issue(s)`
+    ? `<div class="card attn"><div class="why">⚠ ${esc(issueCount)} task-history issue(s)`
       + `${env.data.issues_truncated ? " (first 50 shown)" : ""}`
       + `${env.data.issue_scope === "displayed_tasks" ? " in displayed tasks" : ""};`
       + ` inspect Plane state before treating this board as clear.</div></div>`
@@ -966,20 +1009,20 @@ function renderHeader(env) {
   const t = env.data.totals;
   const coverage = env.data.coverage;
   const coverageCopy = t.overview_retained ? ' · <small class="warn">Refreshing summaries; totals include the last read for pending computers</small>'
-    : coverage?.partial ? ` · <small class="warn">Team summaries: ${coverage.reachable}/${coverage.total} readable; totals cover readable sources</small>` : '';
+    : coverage?.partial ? ` · <small class="warn">Team summaries: ${esc(coverage.reachable)}/${esc(coverage.total)} readable; totals cover readable sources</small>` : '';
   if (!t.fleets) {
     el.innerHTML = `<span class="dim">${t.overview_retained ? "no fleet recorded in last summaries" : coverage ? "no fleet recorded in readable sources" : "no fleet recorded"}</span>` + coverageCopy;
     return;
   }
   const status = env.data.fleets?.length
     ? aggregateFleetStatusCopy(env.data.fleets, t.bots) : 'session counts unavailable';
-  el.innerHTML = `<b>${t.bots}</b> recorded bots · ${esc(status)}`
+  el.innerHTML = `<b>${esc(t.bots)}</b> recorded bots · ${esc(status)}`
     + (t.provisional ? ` <small title="actors no registry scan has confirmed`
-        + ` yet — a mistyped dispatch target mints one">(${t.provisional}`
+        + ` yet — a mistyped dispatch target mints one">(${esc(t.provisional)}`
         + ` unconfirmed identities)</small>` : "")
-    + ` · <b>${t.working}</b> working`
-    + ` · <b class="${t.attention ? "warn" : ""}">${t.attention}</b> need you`
-    + ` · <b class="${t.overdue ? "warn" : ""}">${t.overdue}</b> overdue`
+    + ` · <b>${esc(t.working)}</b> working`
+    + ` · <b class="${t.attention ? "warn" : ""}">${esc(t.attention)}</b> need you`
+    + ` · <b class="${t.overdue ? "warn" : ""}">${esc(t.overdue)}</b> overdue`
     + (t.live_poll !== "ok"
        ? ` <small class="warn" title="the pane sampler is not answering — the`
          + ` working count is the recorded half only">live poll`
@@ -1070,7 +1113,7 @@ function ovPresence(p) {
 }
 function ovNum(n, word, bad = true) {
   if (n === null || n === undefined) return `<span class="ov-warn">${esc(word)} unknown</span>`;
-  return `<span class="${n > 0 && bad ? "ov-bad" : ""}">${n} ${esc(word)}</span>`;
+  return `<span class="${n > 0 && bad ? "ov-bad" : ""}">${esc(n)} ${esc(word)}</span>`;
 }
 function overviewQueryDiagnosticHTML(source) {
   if (source.overview_failure_boundary !== 'server_query_budget') return '';
@@ -1193,8 +1236,8 @@ function renderOverview(env) {
       <details class="ov-team-details"${typeof f.uid === "string" && f.uid ? ` data-team-details="${esc(f.uid)}"${overviewDetails.has(f.uid) ? ' open' : ''}` : ''}>
         <summary>Team details</summary>
       <div class="ov-line">
-        <span>${f.bots} recorded bot${f.bots === 1 ? "" : "s"}${
-          f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${f.provisional} unconfirmed identities)</small>` : ""}</span>
+        <span>${esc(f.bots)} recorded bot${f.bots === 1 ? "" : "s"}${
+          f.provisional ? ` <small title="actors no registry scan has confirmed yet — a mistyped dispatch target mints one">(${esc(f.provisional)} unconfirmed identities)</small>` : ""}</span>
         <small>${esc(f.capture)} capture</small></div>
       <div class="ov-line">${ovPresence(f.presence)}</div>
       <div class="ov-line">
@@ -1203,7 +1246,7 @@ function renderOverview(env) {
       <div class="ov-line">
         <span>${f.newest_report_at
           ? `last report ${esc(ago(f.newest_report_at))}` : "no reports"}${
-          f.reports_24h ? ` · ${f.reports_24h} in 24h` : ""}${
+          f.reports_24h ? ` · ${esc(f.reports_24h)} in 24h` : ""}${
           f.unacked === null || f.unacked === undefined
             ? ` · <span class="ov-warn" title="${esc(f.unacked_reason || "")}">no ack recorded</span>`
             : ` · ${ovNum(f.unacked, "unacked")} <small title="${esc(f.acked_at || "")}">acked by ${
@@ -1216,7 +1259,7 @@ function renderOverview(env) {
       <div class="ov-head"><b>${esc(s.label)}</b><span>${esc(connectionLabel(s.connection_state))}</span></div>
       <div class="ov-line">Team summary: ${s.overview_retained ? `refreshing; showing the last read ${esc(s.overview_read_at ? ago(s.overview_read_at) : 'at an unknown time')}` : s.state === 'ok' ? 'readable' : esc(s.state)}. Connection and reads are checked separately.</div>
       <div class="ov-line">${(s.state === 'ok' || s.overview_retained) && s.host
-        ? `${Number.isSafeInteger(s.host.rows) ? `${s.host.rows} rows · ` : ''}${s.host.spool_files ?? 'unknown'} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
+        ? `${Number.isSafeInteger(s.host.rows) ? `${s.host.rows} rows · ` : ''}${esc(s.host.spool_files ?? 'unknown')} spooled · recorder ${s.host.daemon_serving === true ? 'up' : s.host.daemon_serving === false ? 'DOWN' : 'unknown'}`
         : s.connection_state === 'not_connected' ? 'Choose Connect above to read this computer. Its teams and bot states have not been checked.'
         : esc(s.remediation || 'Team summary unavailable. Activity and tasks are read separately.')}</div>
       <div class="ov-line">${s.overview_retained ? 'Summary refresh is in progress; activity and tasks refresh independently.' : s.connection_state === 'ready' && s.state !== 'ok'
@@ -1310,7 +1353,7 @@ function pushDebugRow(row) {
 function renderDebugRail() {
   $("debug").innerHTML = [...debugRing].reverse().map((row) =>
     `<div class="evt"><span>${esc(ago(row.ingested_at))}</span>`
-    + `<b>${esc(row.family)}</b><span>seq ${row.ingest_seq}</span></div>`
+    + `<b>${esc(row.family)}</b><span>seq ${esc(row.ingest_seq)}</span></div>`
   ).join("");
 }
 
@@ -1454,8 +1497,9 @@ async function refreshBoards() {
   const conversation = Promise.all([
     panel(channelUrl(), value => { renderChannel(value); workLoop.updateChannel(value); }),
     (async () => {
-      const value = await jget("/api/tasks" + q, partial => { if (current()) acceptTaskPoll(partial,false); });
-      return current() ? acceptTaskPoll(value,true) : value;
+      const recordState = {};
+      const value = await jget("/api/tasks" + q, partial => { if (current()) acceptTaskPoll(partial,false,recordState); });
+      return current() ? acceptTaskPoll(value,true,recordState) : value;
     })(),
   ]).then(([ch, tk]) => {
     // Partial paints never replace the work-loop's paired canonical snapshots.
@@ -1641,8 +1685,72 @@ function channelUrl() {
   return `/api/channel?limit=120${fleetQuery("&")}`;
 }
 
+// One team on one computer: workspace.css folds the teams list and the computer's parts to one line each under
+// main[data-teams="1"][data-computers="1"]. markTeams marks how many teams the view has, hidden ones included, while
+// connected-workspace.js marks the computers it lists; a view that lists none (before its account check, or once it
+// has retired) has neither mark.
+// The Computers & status drawer opens itself when its computer asks for attention (onConnectionAttention below).
+// In the fold, a drawer the page opened that way closes again once connected-workspace.js says that attention
+// cleared (onConnectionAttentionCleared below), or, if the fold is not showing yet then, as soon as it is. It stays
+// open once the person has used it: a pointer press, a wheel or trackpad scroll or keyboard focus in it, or a close of
+// their own. A drawer the person opened is never closed for them, and outside the fold nothing closes it.
+let computersAttention = null;   // null, or "raised"/"cleared" for a drawer the page opened for attention
+function openComputersForAttention() {
+  const details = $("computers-details");
+  if (details && !details.open) { details.open = true; computersAttention = "raised"; }
+  else if (computersAttention === "cleared") computersAttention = "raised";
+}
+// The person used the drawer, so it is theirs. toggle also fires after the page's own opening: only a close counts.
+function keepComputersOpen() { computersAttention = null; }
+// In the fold the line scrolls to show the drawer's card: a wheel there, or a press on the line itself (its scrollbar), is use too.
+function keepComputersOpenOnLine(event) { if (event.type === "wheel" || event.target === event.currentTarget) keepComputersOpen(); }
+function computersToggled(event) { if (!event.target.open) computersAttention = null; else showComputerCard(); }
+// In the fold on a wide screen the line scrolls inside itself, and an opened Computers & status drops below it: bring
+// its computer's card, from its name to its Connect, Check connection or Disconnect, into view by scrolling the line
+// itself (never scrollIntoView, which can move the page around the frame). When the line cannot show all of that, the
+// buttons win. A phone's line does not scroll, so nothing moves there.
+function showComputerCard() {
+  const main = typeof document === "undefined" ? null : document.querySelector?.("main");
+  const line = $("rail-fleet"), details = $("computers-details");
+  if (main?.dataset?.teams !== "1" || main?.dataset?.computers !== "1" || !line || !details?.open) return;
+  if (!(line.scrollHeight > line.clientHeight)) return;
+  const card = [...(details.querySelectorAll?.(".connection-card") || [])].find(node => !node.hidden);
+  if (!card) return;
+  const origin = line.getBoundingClientRect().top + (line.clientTop || 0) - line.scrollTop;
+  const top = card.getBoundingClientRect().top - origin, view = line.clientHeight;
+  const end = (card.querySelector?.(".connection-actions") || card).getBoundingClientRect().bottom - origin;
+  if (end - top > view) line.scrollTop = end - view;
+  else if (end > line.scrollTop + view) line.scrollTop = Math.min(top, end - view + 8);
+  else if (top < line.scrollTop) line.scrollTop = top;
+}
+// Opening Message team narrows the line's cap (25% to 15%): show the opened drawer's card again, so its buttons stay reachable.
+// Only on open: closing it moves nothing. work-loop.js's own opens of it (the Tasks view) re-show the card too, which is acceptable.
+function composerToggled(event) { if (event.target?.id === "work-composer" && event.target.open) showComputerCard(); }
+function closeComputersAfterAttention() {
+  const main = typeof document === "undefined" ? null : document.querySelector?.("main");
+  const details = $("computers-details"), teams = Number(main?.dataset?.teams || 0);
+  if (computersAttention !== "cleared") return;
+  // More computers or teams keep today's layout, where the drawer stays as it is; with no team yet, wait for the fold.
+  if (!details?.open || main?.dataset?.computers !== "1" || teams > 1) { computersAttention = null; return; }
+  if (teams !== 1) return;
+  computersAttention = null;
+  if (!details.contains(document.activeElement)) details.open = false;
+}
+function attentionCleared() {
+  if (computersAttention === "raised") computersAttention = "cleared";
+  closeComputersAfterAttention();
+}
+function markTeams() {
+  const main = typeof document === "undefined" ? null : document.querySelector?.("main");
+  if (!main?.dataset) return;
+  if (main.dataset.computers === undefined) delete main.dataset.teams;
+  else main.dataset.teams = String(fleets.length);
+  closeComputersAfterAttention();
+}
+
 function renderFleetTabs() {
   if (typeof updateRoomHeading === "function") updateRoomHeading();
+  if (typeof markTeams === "function") markTeams();
   const el = $("fleet-tabs");
   if (!fleets.length) { el.innerHTML = ""; return; }
   const hidden = hiddenTeams(), hiddenCount = fleets.filter(f => hidden.has(f.uid)).length;
@@ -1692,12 +1800,16 @@ function applyFleetVisibility() {
 // ONE pick path — the tab row and the overview strip's cards (U3) both
 // land here, so a card click can never drift from a tab click.
 function pickFleet(f) {
-  if (currentFleet !== f && typeof resetTaskFilters === "function") resetTaskFilters();
-  if (currentFleet !== f && typeof closeRoomBot === "function") closeRoomBot();
-  if (currentFleet !== f && typeof resetConversationFocus === "function") resetConversationFocus();
-  if (currentFleet !== f) { ++generation; closeEquipment(); }
+  const pickChanged = currentFleet !== f;
+  if (pickChanged) {
+    if (typeof closeRoomBot === "function") closeRoomBot();
+    if (typeof resetConversationFocus === "function") resetConversationFocus();
+    ++generation;
+    closeEquipment();
+  }
   currentFleet = f;
-  syncWorkRoom();
+  // An explicit pick can select the same room the roster already inferred.
+  if (!syncWorkRoom() && pickChanged && typeof resetTaskFilters === "function") resetTaskFilters();
   savePick(currentFleet);
   renderFleetTabs();
   applyFleetVisibility();
@@ -2240,6 +2352,7 @@ let workRoom;
 function syncWorkRoom() {
   const room = activeRoom();
   if (workRoom === room) return false;
+  if (typeof resetTaskFilters === "function") resetTaskFilters();
   workRoom = room;
   workLoop.setRoom(room);
   showLoading();
@@ -2250,7 +2363,8 @@ function activeRoom() {
 }
 const ownerSession = typeof interactionApi.mountSessionControls === "function"
   ? interactionApi.mountSessionControls({ document, element: $("owner-session"),
-      onConnectionAttention() { const details = $("computers-details"); if (details) details.open = true; },
+      onConnectionAttention: openComputersForAttention,
+      onConnectionAttentionCleared: attentionCleared,
       onPause() {
         sessionPaused = true;
         if (typeof resetConversationFocus === "function") resetConversationFocus();
@@ -2274,6 +2388,11 @@ const ownerSession = typeof interactionApi.mountSessionControls === "function"
       onActionPause(scope, kind, recipient) { workLoop.invalidate(undefined, scope, kind, recipient); },
       onActionSourceChange(source) { workLoop.refreshActions(source); },
     }) : null;
+for (const [type, handler] of [["toggle", computersToggled], ["pointerdown", keepComputersOpen], ["wheel", keepComputersOpen],
+  ["focusin", keepComputersOpen]]) $("computers-details")?.addEventListener(type, handler, { passive: true });
+for (const type of ["pointerdown", "wheel"]) $("rail-fleet")?.addEventListener(type, keepComputersOpenOnLine, { passive: true });
+// toggle does not bubble, so the page listens while it travels down to Message team's own drawer.
+document.addEventListener("toggle", composerToggled, { capture: true });
 
 // Injected multi-source transports own their streams; disposal never signs out a host.
 if (typeof interactionApi.dispose === 'function') {

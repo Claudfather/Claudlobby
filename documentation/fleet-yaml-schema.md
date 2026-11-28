@@ -835,6 +835,8 @@ mounts:
 
 Edits write to the real location via the symlink. Stale symlinks (removed from config) are cleaned up on re-generate.
 
+A mount named `project` is also the bot's local project. When the fleet has no `projects.yaml`, each distinct `project` folder becomes a derived project named after the folder ([projects-yaml-schema.md](projects-yaml-schema.md#it-is-the-override-not-the-prerequisite)).
+
 ### `bots.<name>.external_paths`
 
 Declarations that bless absolute paths **outside** the fleet overlay so a compose source may reference them. The compositor runs a **deny-by-default source guard**: any absolute path written into a compose source (a bot's `env`, an MCP fragment's `args`, a permission grant, a timer script, …) fails `generate` unless it is either **anchored** on a composer path or **declared** here.

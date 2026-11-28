@@ -70,7 +70,9 @@ else
 fi
 
 echo "$TS BOT DATA SIZES:" >>"$LOG"
-for bots_dir in "${BOTS_DIRS[@]}"; do
+# A computer with no team has no bots directory; bash 3.2 (macOS) refuses an
+# empty array under `set -u` unless it is expanded this way.
+for bots_dir in ${BOTS_DIRS[@]+"${BOTS_DIRS[@]}"}; do
     [ -d "$bots_dir" ] || continue
     for bot_dir in "$bots_dir"/*/; do
         [ -d "$bot_dir" ] || continue

@@ -821,3 +821,27 @@ def test_foreground_context_preserves_message_failure_and_clears_proof(gateway, 
     assert raised.value is failure
     with pytest.raises(AccessDenied, match="generated_context_refused"):
         check_action_process(adapter.root, adapter.package)
+
+
+def _stored_receipt(adapter, ctx, request_id):
+    import json
+    path = adapter.root / "state/requests" / ctx.fleet_uid / (request_id + ".json")
+    return json.loads(path.read_bytes())
+
+
+def test_direct_session_and_computer_sends_record_no_provenance(gateway, monkeypatch):
+    from claudlobby.application_messages import deliver_bound_message
+    from claudlobby.message_context import resolve_message_route
+    from claudlobby.message_payload import MessageBody
+    adapter, reader, _, ctx, options = gateway
+    calls = native_receiver(monkeypatch)
+    adapter.send(reader, **options, text="Direct session example")
+    assert "provenance" not in _stored_receipt(adapter, ctx, options["request_id"])
+    assert adapter.inspect(reader, **options).request.provenance is None
+    route = resolve_message_route("worker", root=adapter.root, fleet="example",
+                                  package=adapter.package, caller_context=ctx)
+    computer = str(uuid4())
+    deliver_bound_message(route, body=MessageBody.from_input("Computer example"),
+                          request_id=computer, caller_context=ctx)
+    assert "provenance" not in _stored_receipt(adapter, ctx, computer)
+    assert len(calls) == 2

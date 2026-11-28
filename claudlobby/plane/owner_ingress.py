@@ -144,8 +144,8 @@ async def _stop(proc, *, kill: bool) -> None:
         proc._transport.close()
 
 
-class ServePrincipalVerifier:
-    """Bounded async verifier, exclusively for a contained Serve UDS backend.
+class NativePrincipalResolver:
+    """Bounded native identity policy shared by explicit source adapters.
 
     Absolute native executable configuration is operator authority. This class
     does not discover binaries, configure Serve, allowlist owners, initialize
@@ -218,8 +218,7 @@ class ServePrincipalVerifier:
         await self._realm()
         return identity
 
-    async def __call__(self, scope) -> PrincipalRef:
-        source = _source_ip(scope)
+    async def _bounded(self, lookup):
         # Reservation does not yield: active + queued work is bounded on this
         # event loop. The deadline includes waiting for one of four CLI slots.
         if self._pending >= _MAX_PENDING:
@@ -228,7 +227,7 @@ class ServePrincipalVerifier:
 
         async def queued_admission():
             async with self._slots:
-                return await self._admit(source)
+                return await lookup()
 
         try:
             return await asyncio.wait_for(queued_admission(), timeout=_TIMEOUT_SECONDS)
@@ -236,3 +235,22 @@ class ServePrincipalVerifier:
             raise AccessUnavailable("owner_identity_lookup_unavailable") from None
         finally:
             self._pending -= 1
+
+    async def resolve(self, source) -> PrincipalRef:
+        if not isinstance(source, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+            raise AccessDenied("owner_identity_source_refused")
+        return await self._bounded(lambda: self._admit(source))
+
+    async def server_status(self):
+        async def inspect():
+            await self._realm()
+            value = await self._command("status", "--json")
+            await self._realm()
+            return value
+        return await self._bounded(inspect)
+
+
+class ServePrincipalVerifier(NativePrincipalResolver):
+    """The unchanged private-UDS/XFF transport boundary; never an SSH adapter."""
+    async def __call__(self, scope) -> PrincipalRef:
+        return await self.resolve(_source_ip(scope))

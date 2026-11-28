@@ -4,7 +4,9 @@ The connected credential is identity evidence, not setup authority. Optional
 setup storage is initialized only by explicit local approval. No HTTP read or
 constructor repairs it. Same-UID file mutation remains outside this boundary.
 """
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+import fcntl
 import json
 import hashlib
 import math
@@ -12,6 +14,8 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
+import time
 from types import SimpleNamespace
 from uuid import uuid4
 import shlex
@@ -21,7 +25,41 @@ from .owner_connected import OwnerConnected
 from .owner_source import source_host_uid, fresh_owner_setup
 
 PLAN_SECONDS = 600
+#: The most a browser accepts as one setup answer (the pane's own bound, ui/browser-owner-transport.js).
+SETUP_ANSWER_BYTES=131072
+#: What a unit keeps in the plan a person is shown. A unit's environment and admission are the
+#: computer's own working data: most of a plan's bytes, and nothing a person reads. With them a real
+#: first team's plan is larger than SETUP_ANSWER_BYTES, so no browser could ever show its Preview.
+#: Launch never reads this answer: the computer launches its own rendered plan, by fingerprint.
+SHOWN_UNIT=("bot","enroll","fleet","phase","platform","scope","service","sha256","source")
+
+def shown_effects(effects):
+    """A rendered plan's effects as a Preview answers them: each unit without its working data."""
+    units=effects.get("units") if isinstance(effects,dict) else None
+    if not isinstance(units,list): return effects
+    return {**effects,"units":[{key:unit[key] for key in SHOWN_UNIT if key in unit} if isinstance(unit,dict) else unit
+                               for unit in units]}
+
 GRANT_SECONDS = 86400
+
+
+def _linux():
+    """The link marker's platform test: the computer run, and so the link, is Linux only for now."""
+    return sys.platform.startswith("linux")
+
+
+def preparing_seconds():
+    """How long the context read keeps saying "preparing" when it cannot tell whether Preview runs.
+
+    Only that case uses it: while the preview lease shows Preview alive the answer is "preparing"
+    however long it takes, and once the lease shows it gone the answer is "failed" at once. Not a real
+    limit: three stage processes (authorize, render, prepare) each get git_update's stage timeout, plus
+    300 s for the Git and file steps between them, and a stage's deadline restarts whenever a unit
+    finishes. Past it, an unreadable lease reads as "failed"."""
+    from ..git_update import _STAGE_TIMEOUT
+    return 3 * _STAGE_TIMEOUT + 300
+
+
 _SCHEMA = (
     "CREATE TABLE setup_metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL)",
     "INSERT INTO setup_metadata VALUES(1,2)",
@@ -47,6 +85,8 @@ class SetupGrant:
     account_directory: str | None = None
     managed_owner: dict | None = None
     provider_signin: dict | None = None
+    # The messages mark: ``{"alias": "human:<name>"}``, the name chosen on the guided team card.
+    messages: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -68,7 +108,33 @@ def _snapshot(grant):
         value.pop("managed_owner")
     if grant.provider_signin is None:
         value.pop("provider_signin")
+    if grant.messages is None:
+        value.pop("messages")
     return json.dumps(value,sort_keys=True,separators=(",", ":"))
+
+
+def grant_fields(grant):
+    """An approval as reported: every field, except ``messages`` when the card carried no mark,
+    so an unmarked approval reads exactly as before the mark existed."""
+    value = asdict(grant)
+    if grant.messages is None:
+        value.pop("messages")
+    return value
+
+
+def retained_fields(retained):
+    """``RetainedSetupState`` as reported, its approval through ``grant_fields``."""
+    value = asdict(retained)
+    if retained.grant is not None:
+        value["grant"] = grant_fields(retained.grant)
+    return value
+
+
+def messages_shape(value):
+    """The only stored form of the mark: the name's form, not today's reserved list, so a name
+    approved earlier still loads if the list grows."""
+    from ..operation_context import sender_name_form
+    return isinstance(value, dict) and set(value) == {"alias"} and sender_name_form(value["alias"])
 
 
 def _uuid(value):
@@ -142,6 +208,26 @@ def managed_setup(root, grant=None, *, current=True):
     return package
 
 
+def setup_still_stands(access, conn, active, grant):
+    """Whether a stored approval still stands, without its time window: ``None`` when it does.
+
+    ``"revoked"`` when it was withdrawn; ``"stale_binding"`` when the workspace binding is gone,
+    is no longer active for the current owner, or differs from the one the approval pinned.
+    ``retained_state`` and the setup finish both decide with this one function. Reads only,
+    inside the caller's transaction on the authority database.
+    """
+    workspace = access.workspace()
+    workspace._schema(conn)
+    binding = workspace._binding(conn)
+    owner = access._grant(conn)
+    if active == 0:
+        return "revoked"
+    if (binding is None or workspace._state(binding, owner) != "active"
+            or OwnerConnected._snapshot(binding) != grant.binding_snapshot):
+        return "stale_binding"
+    return None
+
+
 def _binding(grant, record):
     return {"generation": grant.generation, "request_id": record["request_id"],
             "config_fingerprint": record["config_fingerprint"], "source_revision": grant.source_revision}
@@ -201,6 +287,7 @@ class OwnerSetup:
 
     def allow(self, expected, *, expected_retained=None):
         if type(expected) is not SetupGrant: raise AccessDenied("setup_denied")
+        if expected.messages is not None and not messages_shape(expected.messages): raise AccessDenied("setup_denied")
         check_managed_owner(expected.managed_owner, self.access.root, expected.installation)
         with self.access._connection(write=True) as conn:
             binding=self.access.workspace()._active_binding(conn,self.access._grant(conn).principal)
@@ -250,13 +337,10 @@ class OwnerSetup:
             raise AccessUnavailable()
         grant = self._grant(row)
         now = self.access._now()
-        self.access.workspace()._schema(conn)
-        binding = self.access.workspace()._binding(conn)
-        owner = self.access._grant(conn)
-        state = ("revoked" if row["active"] == 0 else "expired" if now >= grant.expires_at
+        standing = setup_still_stands(self.access, conn, row["active"], grant)
+        state = ("revoked" if standing == "revoked" else "expired" if now >= grant.expires_at
                  else "not_yet_valid" if now < grant.created_at
-                 else "stale_binding" if binding is None or self.access.workspace()._state(binding, owner) != "active"
-                 or OwnerConnected._snapshot(binding) != grant.binding_snapshot else "allowed")
+                 else standing or "allowed")
         return RetainedSetupState(state, grant, row["launch_id"], row["launch_plan"], state == "allowed")
 
     def local(self):
@@ -274,7 +358,8 @@ class OwnerSetup:
         base={"binding_snapshot","template","fleet","repository","installation","source_revision",
               "install_directory","generation","created_at","expires_at"}
         if not isinstance(value,dict): raise AccessUnavailable()
-        fields = set(value) - {"managed_owner","provider_signin"}
+        fields = set(value) - {"managed_owner","provider_signin","messages"}
+        if "messages" in value and not messages_shape(value["messages"]): raise AccessUnavailable()
         if "provider_signin" in value:
             from .provider_signin import scope_shape
             if not scope_shape(value["provider_signin"]): raise AccessUnavailable()
@@ -331,19 +416,124 @@ class OwnerSetup:
         with self.access._connection() as conn:
             return self._admit(conn,reader,expected=expected,effects=effects)[0]
 
+    def session(self, reader):
+        """The connected session alone, with no setup approval: the parts read's whole admission."""
+        with self.access._connection() as conn:
+            return self.connected._admit(conn,reader.token,reader.principal,source_host_uid(self.access.root),
+                self.access.workspace()._active_binding(conn,reader.principal).operational_origin)
+
+    @property
+    def _lease_path(self):
+        # In state/, as state/provider-signin is: the owner storage directory admits only its own files.
+        state = Path(self.access.root) / "state"
+        if state.resolve() != state.absolute():
+            raise AccessUnavailable("setup state directory is not a plain directory")
+        return state / "setup-preview.lock"
+
+    @contextmanager
+    def preview_lease(self):
+        """Held, by whichever process runs Preview, for exactly as long as it runs.
+
+        An advisory flock on a private file that is never removed: the operating system releases it when
+        the holder closes it or dies, so a crash leaves no marker that reads as running. flock belongs to
+        the open file, so a second open in the same process sees it held too. A context read's probe
+        holds it only for an instant, so a starting Preview tries for a moment before calling it busy.
+        """
+        fd = os.open(self._lease_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                raise AccessUnavailable("setup preview lease is not a private regular file")
+            for attempt in range(50):
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+                except BlockingIOError:
+                    if attempt == 49: raise AccessUnavailable() from None
+                    time.sleep(0.01)
+            yield
+        finally:
+            os.close(fd)  # Closing releases the lock.
+
+    def preview_running(self):
+        """True while a process holds the preview lease, False when none does, None when it cannot be read."""
+        try:
+            fd = os.open(self._lease_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except (OSError, AccessUnavailable):
+            return None  # Absent (no Preview took it on this root yet) or unreadable: unknown, never "gone".
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+                return None
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            except OSError:
+                return None
+            return False
+        finally:
+            os.close(fd)
+
+    def _scope(self, grant):
+        return {"directory":grant.install_directory,
+                "manifests":[str(self.access.root/"local"/grant.fleet/"fleet.yaml")]}
+
+    def _preparing(self, grant, record):
+        """This approval's own first-team operation, still in Preview's prepare phase.
+
+        The same scope, target and request identity operation() requires; only the fields the prepare
+        stages have not written yet may be missing: the configuration fingerprint (bound when
+        preparation finalizes) and initialize (written just after it). Never an authority to launch.
+        """
+        finalized=record.get("finalized",True)
+        fingerprint=record.get("config_fingerprint")
+        return (record.get("initialization_scope")==self._scope(grant) and record.get("target")==grant.source_revision
+                and _uuid(record.get("request_id")) and record.get("phase")=="prepare"
+                and record.get("initialize",True) is True
+                and (finalized is False and fingerprint is None
+                     or finalized is True and isinstance(fingerprint,str) and re.fullmatch(r"[0-9a-f]{64}",fingerprint) is not None))
+
     def operation(self, grant):
         from ..git_update import read_update
         package=managed_setup(self.access.root,grant,current=False)
         record=read_update(package.installation)
         if record is None: return None
-        scope={"directory":grant.install_directory,
-               "manifests":[str(self.access.root/"local"/grant.fleet/"fleet.yaml")]}
+        scope=self._scope(grant)
         if (record.get("initialization_scope")!=scope or record.get("target")!=grant.source_revision
                 or not record.get("initialize") or not _uuid(record.get("request_id"))
                 or not isinstance(record.get("config_fingerprint"),str)
                 or not re.fullmatch(r"[0-9a-f]{64}",record["config_fingerprint"])):
             raise AccessDenied("setup_original_operation_changed")
         return record
+
+    def kept_preview(self, retained, record):
+        """True only when ``record`` is this approval's own prepared Preview and nothing was launched.
+
+        The guide may start again over it (the page that embedded the last run closed it before
+        Launch). The approval is active and holds no launch; the record is the one operation()
+        accepts for it, finalized at quiesce with no stage error, its configuration not committed and
+        never dispatched (nothing a continue saves first: quiet or notice support, job support or dispatch); and the Preview row kept for this approval names exactly that record, as
+        retain() binds it, whether or not its window has passed. Anything else is not a Preview.
+        """
+        if (retained is None or retained.state != "allowed" or not retained.effective_active
+                or retained.grant is None or retained.launch_id is not None or retained.launch_plan is not None):
+            return False
+        grant = retained.grant
+        try:
+            if self.operation(grant) != record:
+                return False
+            with self.access._connection() as conn:
+                if self._retained_state(conn) != retained:
+                    return False
+                row = conn.execute("SELECT payload FROM setup_previews WHERE generation=?", (grant.generation,)).fetchone()
+                kept = json.loads(row["payload"]).get("request") if row is not None else None
+        except (AccessDenied, AccessUnavailable, OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
+        return (kept is not None and kept == _binding(grant, record)
+                and record.get("phase") == "quiesce" and record.get("finalized", True) is True
+                and not record.get("stage_error") and not record.get("config_committed")
+                and all(record.get(key) is None for key in ("quiet_support", "notice_support", "job_dispatch", "updater_job", "job_support")))
 
     def _request(self, conn, grant):
         row=conn.execute("SELECT payload FROM setup_previews WHERE generation=?",(grant.generation,)).fetchone()
@@ -360,34 +550,64 @@ class OwnerSetup:
         else:
             # Recover a lost preview response from the canonical frozen bytes,
             # not from mutable authoring or a replacement operation.
-            from ..config_plan import read_rendered
-            from ..commands.setup import _template_config
-            rendered=read_rendered(self.access.root,record["config_fingerprint"])
-            if grant.managed_owner is not None:
-                frozen = rendered.inputs.get(grant.managed_owner["override"], {}).get("state", {})
-                if (frozen.get("resolved") != grant.managed_owner["override"]
-                        or frozen.get("node", {}).get("kind") != "file"
-                        or frozen["node"].get("sha256") != grant.managed_owner["sha256"]):
-                    raise AccessDenied("setup_owner_binding_changed")
-            if rendered.revision!=grant.source_revision or rendered.fleets!=(grant.fleet,):
-                raise AccessDenied("setup_other_fleet")
-            sources=rendered.effects.get("fleet_sources")
-            if not isinstance(sources,dict) or set(sources)!={grant.fleet}:
-                raise AccessDenied("setup_original_operation_changed")
-            item=sources[grant.fleet]
-            if not isinstance(item,dict) or set(item)!={"fleet","projects"}:
-                raise AccessDenied("setup_original_operation_changed")
-            manifest,content=rendered.frozen_input(item["fleet"],required=True)
-            projects,project_content=rendered.frozen_input(item["projects"])
-            expected=self.access.root/"local"/grant.fleet/"fleet.yaml"
-            if (manifest!=expected or projects!=expected.parent/"projects.yaml" or project_content is not None
-                    or rendered.effects.get("fleet_manifests",{}).get(grant.fleet)!=str(expected)):
-                raise AccessDenied("setup_original_operation_changed")
-            if content!=_template_config(grant.template,grant.fleet,grant.repository,payload["goal"],
-                    **({"project_directory": grant.project_directory} if grant.project_directory is not None else {}),
-                    **({"account_directory": grant.account_directory} if grant.account_directory is not None else {})):
-                raise AccessDenied("setup_original_operation_changed")
+            self.check_frozen(grant,record,payload["goal"])
         return actual
+
+    def check_frozen(self, grant, record, goal):
+        """The operation's frozen configuration is exactly this approval's first team with ``goal``.
+
+        Read from the canonical frozen bytes of ``record``'s configuration fingerprint, never from the
+        team's own files. Refuses (AccessDenied) otherwise; returns nothing.
+        """
+        from ..config_plan import read_rendered
+        from ..commands.setup import _template_config
+        rendered=read_rendered(self.access.root,record["config_fingerprint"])
+        if grant.managed_owner is not None:
+            frozen = rendered.inputs.get(grant.managed_owner["override"], {}).get("state", {})
+            if (frozen.get("resolved") != grant.managed_owner["override"]
+                    or frozen.get("node", {}).get("kind") != "file"
+                    or frozen["node"].get("sha256") != grant.managed_owner["sha256"]):
+                raise AccessDenied("setup_owner_binding_changed")
+        if rendered.revision!=grant.source_revision or rendered.fleets!=(grant.fleet,):
+            raise AccessDenied("setup_other_fleet")
+        sources=rendered.effects.get("fleet_sources")
+        if not isinstance(sources,dict) or set(sources)!={grant.fleet}:
+            raise AccessDenied("setup_original_operation_changed")
+        item=sources[grant.fleet]
+        if not isinstance(item,dict) or set(item)!={"fleet","projects"}:
+            raise AccessDenied("setup_original_operation_changed")
+        manifest,content=rendered.frozen_input(item["fleet"],required=True)
+        projects,project_content=rendered.frozen_input(item["projects"])
+        expected=self.access.root/"local"/grant.fleet/"fleet.yaml"
+        if (manifest!=expected or projects!=expected.parent/"projects.yaml" or project_content is not None
+                or rendered.effects.get("fleet_manifests",{}).get(grant.fleet)!=str(expected)):
+            raise AccessDenied("setup_original_operation_changed")
+        if content!=_template_config(grant.template,grant.fleet,grant.repository,goal,
+                **({"project_directory": grant.project_directory} if grant.project_directory is not None else {}),
+                **({"account_directory": grant.account_directory} if grant.account_directory is not None else {})):
+            raise AccessDenied("setup_original_operation_changed")
+
+    def preview_status(self, reader):
+        """What became of this approval's Preview, for the context read only: (state, request, reserved, kept).
+
+        state is "none" (no preview row), "preparing" (a row without a kept request whose update record
+        is absent or is this approval's own operation still in its prepare phase; "failed" instead when
+        that record carries a stage error), or None, when the original request rules (_request) decide
+        exactly as before, refusals included. kept is the row's goal and window, with the record read.
+        """
+        with self.access._connection() as conn:
+            grant,row=self._admit(conn,reader)
+            reserved=row["launch_id"] is not None
+            preview=conn.execute("SELECT created_at,expires_at,payload FROM setup_previews WHERE generation=?",(grant.generation,)).fetchone()
+            if preview is None: return "none",None,reserved,None
+            payload=json.loads(preview["payload"])
+            kept={"goal":payload["goal"],"created_at":preview["created_at"],"expires_at":preview["expires_at"],"record":None}
+            if payload.get("request") is None and not reserved:
+                from ..git_update import read_update
+                record=read_update(managed_setup(self.access.root,grant,current=False).installation)
+                if record is None or self._preparing(grant,record):
+                    return ("failed" if record is not None and record.get("stage_error") else "preparing"),None,reserved,{**kept,"record":record}
+            return None,self._request(conn,grant),reserved,kept
 
     def retained_request(self, reader):
         with self.access._connection() as conn:
@@ -461,19 +681,197 @@ class SetupEngine:
             if runtime.is_symlink() or runtime.exists() and (not runtime.is_dir() or next(runtime.iterdir(),None) is not None):
                 raise AccessDenied("setup_existing_runtime")
 
+    def _plan(self,grant,request,expires_at,phase):
+        from ..config_plan import read_rendered
+        rendered=read_rendered(self.root,request["config_fingerprint"])
+        return {"version":3 if grant.template == "local-project" else 2,**request,"expires_at":expires_at,
+            "fleets":list(rendered.fleets),"changes":[asdict(change) for change in rendered.changes],
+            "effects":shown_effects(rendered.effects),"dispatch":"prepared","phase":phase,
+            # A marked approval: Launch sends this Preview's goal to the lead once. The page finishes it.
+            **({"sends_goal":True,"finish":"page"} if grant.messages is not None else {})}
+
+    def _retained_plan(self,grant,request,kept):
+        """The prepared first team a Preview kept, shaped as its response, for a page whose response was lost."""
+        try:
+            record=self.store.operation(grant)
+            if record is None or record["phase"]!="quiesce": return None
+            return {**self._plan(grant,request,kept["expires_at"],record["phase"]),"goal":kept["goal"]}
+        except (AccessDenied,AccessUnavailable,OSError,ValueError,KeyError): return None
+
+    def _preview_state(self,grant,request,reserved,state,kept,running):
+        """preview_state for the context read (none, preparing, ready, expired, failed), or None beside a
+        reserved launch or a kept request the computer cannot show as a plan; and the plan when ready.
+        running is the preview lease's answer, read after the status (see context)."""
+        now=self.store.access._now()
+        if state=="preparing":
+            if running is False or running is None and now>=kept["created_at"]+preparing_seconds():
+                return "failed",None
+            return state,None
+        if state is not None or reserved: return state,None
+        try: record=self.store.operation(grant)
+        except (AccessDenied,AccessUnavailable,OSError,ValueError,KeyError): record=None
+        # Only a prepared, unlaunched operation is a preview; one a local continue moved on is read as before.
+        if record is None or record["phase"]!="quiesce": return None,None
+        if not now<kept["expires_at"]: return "expired",None
+        preview=self._retained_plan(grant,request,kept)
+        return ("ready",preview) if preview is not None else (None,None)
+
     def context(self,reader):
         grant=self.store.authorize(reader)
         managed_setup(self.root,grant,current=False)
-        request,reserved=self.store.retained_request(reader)
+        state,request,reserved,kept=self.store.preview_status(reader)
+        running=None
+        if state=="preparing":
+            # The lease works across processes: each SSH call is its own process, the listener one for many.
+            running=self.store.preview_running()
+            if running is False:
+                # A Preview may have finished between that read and this test. Its request is filled only while it
+                # holds the lease, and no second row can begin, so a second read is final.
+                state,request,reserved,kept=self.store.preview_status(reader)
+        state,preview=self._preview_state(grant,request,reserved,state,kept,running)
+        recorded=state=="failed" and kept["record"] is not None  # a failed preparation the computer can continue
         return {"version":3 if grant.template == "local-project" else 2,"template":grant.template,"fleet":grant.fleet,
             **({"project_directory":grant.project_directory} if grant.template == "local-project" else {"repository":grant.repository}),
             "source_revision":grant.source_revision,"generation":grant.generation,"expires_at":grant.expires_at,
             **({"managed_owner":True} if grant.managed_owner is not None else {}),
+            **({"sends_goal":True} if grant.messages is not None else {}),
             **({"provider_signin":True,"signin_attempt":self.signin.summary(reader,grant) if request is None else None} if grant.provider_signin is not None else {}),
             "request":request,"launch_reserved":reserved,
-            **({"continuation":_continuation(self.root,grant)} if request and not reserved else {})}
+            **({"preview_state":state} if state is not None else {}),
+            **({"preview":preview} if preview is not None else {}),
+            **({"continuation":_continuation(self.root,grant)} if request and not reserved or recorded else {})}
+
+    def state(self,reader):
+        """The parts read: what this computer has, for the workspace's parts view. Reads only; writes nothing.
+
+        Admitted by a connected session alone (the HTTP door checks it before and after). ``computer`` is
+        ``started`` for a computer started with no team (phase 1's ``start_state``) or one whose committed
+        configuration lists a team; ``teams`` counts the committed configuration's teams. ``provider`` is
+        ``linked`` exactly when a Claude sign-in line is saved on this computer, by the check every sign-in
+        attempt already makes (the line's value is never read out); no approval and no attempt's record
+        decides it, and an empty value or an unreadable file is not linked (``environment_linked``). ``teams`` is a
+        count, not a running state: it is also true mid-Launch, after a failed Launch and after a stop.
+        ``provider.link`` is ``available`` on a started Linux computer (phase 1's ``start_state``) with no team
+        approval or Launch retained, where Claude is linked with a link approval; ``not_here`` on every other
+        computer (a nine-card one, an unstarted one, a Mac). It is the same for a computer whatever its approvals.
+        ``provider.signin`` is present only while the computer holds a link approval that has not lapsed unused
+        and Claude is not linked (``_link_signin_part``); a computer with no link approval never has it.
+        ``team.state`` is ``launch_unfinished`` while a team preparation that a Launch dispatched has not
+        finished cleanly (its update record is not ``done``, or is ``done`` with health errors), or when the
+        update record cannot be read; otherwise ``none``. A Preview nothing launched is never dispatched, so it
+        reads ``none``. Later versions add keys and states inside a part; ``version`` stays 1 while nothing is removed.
+        """
+        from ..active_config import read_current_config
+        from ..config_plan import PlanError
+        from ..git_update import UpdateError, read_update, team_preparation
+        from .owner_source import start_state
+        from .provider_signin import SigninRefused, environment_linked, team_retained
+        self.store.session(reader)
+        installation=managed_setup(self.root).installation
+        try: teams=len(read_current_config(self.root,installation=installation)["fleets"])
+        except (PlanError,OSError,ValueError,KeyError,TypeError): teams=0
+        here=start_state(self.root,installation)=="started"
+        started=here or teams>0
+        link="not_here"
+        if here and _linux():
+            try:
+                with self.store.access._connection() as conn:
+                    if not team_retained(self.store.access,conn): link="available"
+            except (AccessDenied,AccessUnavailable): pass  # a team setup that cannot be read is not this road
+        try: linked=environment_linked(self.root)
+        except (SigninRefused,OSError): linked=False  # no environment file, or one the sign-in check refuses
+        signin=None if linked else self._link_signin_part()  # linked wins
+        try:
+            record=read_update(installation)
+            unfinished=(record is not None and team_preparation(record) and record.get("job_dispatch") is not None
+                and (record["phase"]!="done" or bool(record.get("health_errors"))))
+        except FileNotFoundError: unfinished=False
+        except (UpdateError,OSError,ValueError,KeyError,TypeError): unfinished=True  # the guide's own view stays
+        return {"version":1,"computer":"started" if started else "not_started",
+            "provider":{"state":"linked" if linked else "not_linked","link":link,**({"signin":signin} if signin is not None else {})},"team":{"state":"launch_unfinished" if unfinished else "none"},
+            "teams":teams if started else 0,"bots":[],"helper":{"state":"later" if linked else "asleep"}}
+
+    def _link_signin_part(self):
+        """The parts read's ``provider.signin``: the link approval's sign-in, which a view resumes from alone.
+
+        None with no link approval, one that lapsed unused (no attempt has its generation and its
+        ``unused_until`` has passed), or one that cannot be read. Otherwise ``generation`` and ``phase``:
+        ``approved`` before its first attempt, ``waiting`` while its current attempt runs (a starting or
+        waiting row with the sign-in lease held), else ``ended``. Then that attempt's ``attempt_id``,
+        ``state`` and ``reason`` (null before one; a starting or waiting row whose lease is free reads
+        ``unknown``/``interrupted``, as status reads it), ``code_sent``, ``retryable`` (begin would admit a
+        new attempt ID under this approval) and ``unconfirmed`` (an ``unknown``/``child_quiet_unproven``
+        attempt whose lease is still held). Never a url, code or token: the url stays in status.
+        """
+        from .provider_signin import LinkStore, ProviderSignin, _TERMINAL, _names, signin_running
+        try:
+            with self.store.access._connection() as conn:
+                approval=LinkStore._read(conn)
+                if approval is None: return None
+                rows=0
+                current=None
+                if "setup_provider" in _names(conn):
+                    rows=ProviderSignin._attempts(conn,approval,None)
+                    current,_=ProviderSignin._current(conn)
+            part={"generation":approval.generation,"phase":"approved","attempt_id":None,"state":None,"reason":None,
+                  "code_sent":False,"retryable":False,"unconfirmed":False}
+            if not rows:
+                return None if self.store.access._now()>=approval.unused_until else part
+            part["phase"]="ended"
+            if current is None or current["generation"]!=approval.generation: return part
+            held=signin_running(self.root)
+            state,reason=current["state"],current["reason"]
+            if state not in _TERMINAL:
+                if held: part["phase"]="waiting"
+                else: state,reason="unknown","interrupted"
+            return {**part,"attempt_id":current["attempt_id"],"state":state,"reason":reason,"code_sent":current["code_delivered"]==1,
+                "retryable":part["phase"]=="ended" and not held and ProviderSignin._retryable(current,rows) and self.signin._room(approval),
+                "unconfirmed":(state,reason)==("unknown","child_quiet_unproven") and held}
+        except (AccessDenied,AccessUnavailable): return None  # the view offers Link Claude again; a new yes replaces the row
+
+    def signin_link_held(self):
+        """Does this computer hold a link approval? Without one, a sign-in call is today's team call, in today's order."""
+        from .provider_signin import LinkStore
+        with self.store.access._connection() as conn:
+            return LinkStore._read(conn) is not None
+
+    def _team_signin(self,generation):
+        """Does a sign-in call naming ``generation`` go to the team approval? Otherwise to the link approval.
+
+        A computer that holds no link approval: the team approval, so every computer without one keeps
+        exactly today's calls and answers. With one: none of the three team tables, the link approval;
+        some but not all, AccessUnavailable, as every team read; all three, the team approval when it is
+        active and names this generation, else the link approval.
+        """
+        from .provider_signin import LinkStore, _TEAM_TABLES, _names
+        with self.store.access._connection() as conn:
+            if LinkStore._read(conn) is None: return True
+            present=_names(conn)&_TEAM_TABLES
+            if not present: return False
+            if present!=_TEAM_TABLES: raise AccessUnavailable()
+            self.store._schema(conn)
+            row=conn.execute("SELECT * FROM setup_grant WHERE singleton=1").fetchone()
+            return row is not None and row["active"]==1 and self.store._grant(row).generation==generation
+
+    def signin_approval(self,reader,generation):
+        """The approval a sign-in call names, team or link, admitted; the HTTP door closes with it."""
+        if self._team_signin(generation):
+            grant=self.store.authorize(reader)
+        else:
+            grant=self.signin.link.authorize(reader)
+        if grant.generation!=generation: raise AccessDenied("setup_denied")
+        return grant
+
+    def _link_signin_grant(self,reader,generation,attempt_id):
+        """A sign-in call under the link approval: its own fences, none of Preview's or Launch's."""
+        approval=self.signin.link.authorize(reader,effects=True)
+        if approval.generation!=generation: raise AccessDenied("setup_denied")
+        if not _uuid(attempt_id): raise AccessDenied("signin_not_allowed")
+        managed_setup(self.root,approval)
+        return approval
 
     def _signin_grant(self,reader,generation,attempt_id):
+        if not self._team_signin(generation): return self._link_signin_grant(reader,generation,attempt_id)
         grant=self.store.authorize(reader,effects=True)
         if grant.provider_signin is None or grant.generation!=generation or not _uuid(attempt_id):
             raise AccessDenied("signin_not_allowed")
@@ -512,28 +910,31 @@ class SetupEngine:
     def preview(self,reader,generation,goal):
         if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()
         try:
-            from ..commands.setup import _fleet_setup, _template_config
-            from ..config_plan import read_rendered
-            grant=self.store.authorize(reader,effects=True)
-            if grant.generation!=generation: raise AccessDenied("setup_denied")
-            managed_setup(self.root,grant)
-            if grant.provider_signin is not None: self.signin.ready(reader,grant)
-            self._first_team(grant)
-            self._project_scope(grant)
-            _template_config(grant.template,grant.fleet,grant.repository,goal,
-                **({"project_directory":grant.project_directory} if grant.project_directory is not None else {}),
-                **({"account_directory":grant.account_directory} if grant.account_directory is not None else {}))
-            self.store.begin_preview(reader,grant,goal)
-            output=_fleet_setup(SimpleNamespace(root=str(self.root),fleet=grant.fleet,seed=False,template=grant.template,
-                config=None,repository=grant.repository,project_directory=grant.project_directory,goal=goal,replace_config=False,plan_only=True,
-                install_directory=grant.install_directory,account_directory=grant.account_directory))
-            record=output.data["update"]
-            request,expires_at=self.store.retain(reader,grant,record)
-            rendered=read_rendered(self.root,request["config_fingerprint"])
-            return {"version":3 if grant.template == "local-project" else 2,**request,"expires_at":expires_at,
-                "fleets":list(rendered.fleets),"changes":[asdict(change) for change in rendered.changes],
-                "effects":rendered.effects,"dispatch":"prepared","phase":record["phase"]}
+            with self.store.preview_lease():
+                return self._preview(reader,generation,goal)
         finally: self._effects_lock.release()
+
+    def _preview(self,reader,generation,goal):
+        """The Preview itself, run under the effects lock and the preview lease."""
+        from ..commands.setup import _fleet_setup, _template_config
+        grant=self.store.authorize(reader,effects=True)
+        if grant.generation!=generation: raise AccessDenied("setup_denied")
+        managed_setup(self.root,grant)
+        if grant.provider_signin is not None: self.signin.ready(reader,grant)
+        self._first_team(grant)
+        self._project_scope(grant)
+        _template_config(grant.template,grant.fleet,grant.repository,goal,
+            **({"project_directory":grant.project_directory} if grant.project_directory is not None else {}),
+            **({"account_directory":grant.account_directory} if grant.account_directory is not None else {}))
+        self.store.begin_preview(reader,grant,goal)
+        output=_fleet_setup(SimpleNamespace(root=str(self.root),fleet=grant.fleet,seed=False,template=grant.template,
+            config=None,repository=grant.repository,project_directory=grant.project_directory,goal=goal,replace_config=False,plan_only=True,
+            install_directory=grant.install_directory,account_directory=grant.account_directory))
+        record=output.data["update"]
+        request,expires_at=self.store.retain(reader,grant,record)
+        plan=self._plan(grant,request,expires_at,record["phase"])
+        # The exact text Launch approves, read back from the computer, not from the page's box.
+        return {**plan,"goal":goal} if grant.messages is not None else plan
 
     def launch(self,reader,generation,request_id,config_fingerprint,source_revision):
         if not self._effects_lock.acquire(blocking=False): raise AccessUnavailable()

@@ -1,0 +1,3 @@
+### Fixed — the Claude sign-in step keeps its lines and buttons still as sign-in starts
+
+In the first-team setup panel, "Starting Claude sign-in…" first appeared below Sign in to Claude while the click was on its way, then jumped above it once the computer answered. It now shows once, in the step's line above the buttons, from the click on, after Sign in to Claude or Try again. When the link is ready that line reads "Open Claude sign-in, then paste the code here by 12:31 AM." It is one line instead of two, so Open Claude sign-in lands exactly where the held button was. After a sign-in that may be replaced, Try again is the only action. Check sign-in progress no longer sits beside it, since there is nothing left to check. What each action sends, and when, is unchanged.

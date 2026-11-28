@@ -870,3 +870,47 @@ def test_setup_dispatch_drains_terminal_before_post_context_exec(tmp_path, monke
     args = SimpleNamespace(root=str(tmp_path), fleet=None, seed=False, json=False, owner_action="setup")
     with pytest.raises(OSError, match="synthetic exec refusal"):
         host_owner.dispatch(args)
+
+
+
+def test_card_finish_registers_the_name_and_sends_the_goal_through_the_local_path(message_owner, monkeypatch):
+    """The setup finish's real reach (04b1): taken names, registration without a card, and one send to
+    the lead with the setup finish's provenance, matched from its durable receipt."""
+    from claudlobby.commands.host_owner_setup import _CardEffects, _Halt, _sent, goal_request_id
+    from tests.test_message_write_cli import _native
+    store, _host, owner, ctx = message_owner
+    paths = ctx.context.paths
+    card = _CardEffects(paths, store, SimpleNamespace(fleet="example"))
+    taken = card.taken()
+    assert {"local-owner", *ctx.bots} <= taken and "ada-lovelace" not in taken
+    def withdrawn():
+        raise _Halt("revoked")
+    with pytest.raises(_Halt):  # Refused inside the registration's admission: no name is written.
+        card.register("human:ada-lovelace", withdrawn)
+    assert "ada-lovelace" not in card.taken()
+    ids = card.register("human:ada-lovelace", lambda: None)
+    assert ids["owner"] == owner and ids["fleet_uid"] == ctx.fleet_uid
+    assert ids["lead_uid"] == ctx.bots[ctx.context.fleet.manager].uid and ids["actor_uid"].startswith("actor_")
+    assert "ada-lovelace" in card.taken() and card.register("human:ada-lovelace", withdrawn) == ids
+    request_id = goal_request_id(str(uuid4()))
+    assert card.receipt(ids["fleet_uid"], request_id) is None
+    calls, checked = [], []
+    _native(monkeypatch, calls)
+    def refuse(ctx, route):
+        raise _Halt("revoked")
+    with pytest.raises(_Halt):
+        card.send("human:ada-lovelace", request_id, "Ship the signup form", refuse)
+    assert calls == [] and card.receipt(ids["fleet_uid"], request_id) is None, "a refused check sends nothing"
+    def check(ctx, route):
+        checked.append((ctx.caller.uid, ctx.caller.alias, route.peer.uid))
+    try:
+        card.send("human:ada-lovelace", request_id, "Ship the signup form", check)
+    except Exception:
+        pass  # Delivery proof is read from the receipt, as the finish does.
+    assert checked == [(ids["actor_uid"], "human:ada-lovelace", ids["lead_uid"])] and len(calls) == 1
+    view = card.receipt(ids["fleet_uid"], request_id)
+    assert view.provenance == {"carrier": "setup_finish"}
+    value = {"actor_uid": ids["actor_uid"], "lead_uid": ids["lead_uid"]}
+    assert _sent(view, value, "Ship the signup form") == {"state": "sent"}
+    assert _sent(view, value, "Another body") == {"state": "unknown", "reason": "request_id_taken"}
+    assert store.local_action_status().message_grants == (), "the send path never grants"

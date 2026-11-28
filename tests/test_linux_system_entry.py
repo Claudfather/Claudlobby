@@ -54,6 +54,14 @@ def test_exact_whole_leaf_is_the_only_admitted_payload():
             module.decode_payload(text)
 
 
+def test_the_pin_is_the_current_leaf_within_the_payload_limit():
+    # Only LEAF_SHA256 changes when the leaf does; the bound and the uid gate stay.
+    module = payload()
+    raw = LEAF.read_bytes()
+    assert module.LEAF_SHA256 == hashlib.sha256(raw).hexdigest()
+    assert module.PAYLOAD_LIMIT == 65536 and len(raw) <= 61440
+
+
 @pytest.mark.parametrize("verb", ["inspect", "apply", "status"])
 def test_canonical_request_is_preserved_without_plan_replacement(verb):
     module = payload(); raw = wire(module, verb)

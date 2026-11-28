@@ -214,6 +214,180 @@ tasks and exact linked task detail use the existing aggregate reader/renderer.
 All agents, Team details, Recorder, search and bot equipment inspection are
 explicitly disabled because the bounded aggregate does not supply those reads.
 
+**Browser-carrier setup view.** Over the browser carrier
+(`fetch.browserOwnerTransport`) the document is the body of the website's setup
+step until the bound computer is ready with a team; from then on it is the
+connected view of that one computer (the working form, below). The carrier adds two cosmetic markers beside that flag:
+`browserOwnerReference`, the `reference_id` its parent's admitted offer bound
+(`null` before an offer, kept after retirement), and `browserOwnerSettled`, which
+resolves, never rejects, once an offer is admitted or the carrier retires
+without one. Neither is a grant or a network authority. The account check still
+matches the complete saved-reference set, a controller still exists for every
+saved reference, and each carrier request is still checked against its live
+bound target. The entry uses the bound reference only for presentation. Other
+saved computers are left out of the computer list, attention callbacks, and the
+aggregate sources, coverage, team choices and blocker text (the reader's
+`shown` source filter). Before an offer, or when none arrives, every computer
+stays listed. A later offer repaints, and `presentationChanged` asks the boards
+to read again.
+
+In the setup form the document marks `<html data-workspace-view="setup">`.
+`workspace.css` then shows only the setup host. The header (Rooms, Tasks, More), the sidebar (teams,
+computer cards, overview, diagnostics), the room heading and search, activity,
+tasks, Recorder and the Message team composer are all hidden. The page grows
+with its content and has no internal scroll container, and the panel fills the
+frame width. The bound computer's panel is the view in every connection state,
+except that a started computer shows its parts instead ("A started computer's parts").
+Its first step, Connect this computer, mirrors that computer's own Connect or
+Check connection. One click sends one connect. Nothing connects, signs in or
+retries a session mutation automatically, and failures say what to choose next
+in plain sentences. After Connect, the existing steps follow: approve setup,
+sign in to Claude, describe the goal, launch. When the computer is still in
+first-team setup (`setup_only`), a Connect chosen in the panel is followed by one
+setup approval read (`context`, which changes nothing on the computer), so
+approve setup is done without a second click. A computer that is already set up
+gets no automatic approval read. If the read fails, no approval is shown, Check
+setup approval stays the step's action and nothing retries it. When the computer
+has said (`launch_reserved`) that the request this browser keeps holds a Launch,
+the browser keeps that word beside the request (`<storage key>:launch`). After
+each Connect or Check connection chosen in the panel, and after any approval
+read, the page then reads that launch's status once (`receipt`, which also
+changes nothing on the computer), exactly as Check launch status would, but only
+when the computer's word for the kept request was stored before that Connect. It
+never reads when the launch is already shown finished, when a Preview can be
+launched, or while the launch hand-over is already reading. The read lands on
+Team launched or the launch's unfinished state. A failed or refused read leaves
+the view as it was and shows nothing, and nothing retries it. The same word
+hides "Nothing runs on this computer until you choose Launch team." from the
+first paint. A request kept from a Preview alone, a word stored for another
+request, or a word this browser cannot read gets no launch status read.
+A computer set up again from nothing answers the approval read with a new
+approval that holds no request. A computer cannot hold a new approval while it
+keeps any Preview or Launch (`allow` refuses it with
+`setup_original_request_retained`), so the page then sets the request it kept
+under the earlier approval aside with the conflicting identifiers (still listed
+under Technical details, never launched or followed), and stops following a Claude
+sign-in it kept under the earlier approval. When that list already holds 16,
+its oldest entry goes, since conflicting identifiers gate nothing. The earlier
+request's `:launch` word stays in storage but has no effect, because it only
+counts for the request the page keeps. The new approval's sign-in, preview and
+launch are offered as on a fresh page. A null request under the same approval
+changes nothing. Until an approval read succeeds, Check setup approval leads
+over Check launch status, since that read is what shows a computer set up
+again. If only the owner database were wiped while the installation and its
+team stayed, the page would also set its request aside and no longer say "Do
+not launch again"; what then prevents a second team is the computer's own
+first-team checks (`setup_other_fleet`, `setup_other_inputs`,
+`setup_existing_runtime`), not this browser's record.
+Sign-in, preview and launch still each wait for their own click. Focus then moves to the next shown,
+enabled action, or stays where it is if there is none. A clean done receipt for the
+current request marks every shown step done, with "Team launched. Your team is
+running on this computer." This holds even after the launch handoff's status
+check moves the connection on and clears the approval context. A request
+rebound later is not shown as launched. Keyboard focus moves on after a panel
+Connect only while the frame has focus and nothing else took it. The setup
+form never reveals the rest of the workspace. While no panel can show, one status
+line says why: checking, account unavailable, no saved computer, or reopen setup.
+
+**The working form.** Over the browser carrier, once the bound computer's
+session is `ready`, its parts read answers `started` with at least one team, and
+the page no longer follows a Launch, the document removes `data-workspace-view`
+and shows the connected view a direct connection gets for that one computer: its
+parts as a strip above the team's rooms, tasks and Message team composer
+(`data-setup-focus="shared"`). Every `workspace.css` rule that hides the header,
+sidebar, room or composer applies only under the setup marker or the `only`
+focus. A page that sent or followed a Launch stops following it at a clean done
+receipt for the current request; a parts read held back while it followed is then
+sent once, so the page that launched and a page opened again end on the same
+view. A receipt that is not clean keeps the panel and its Check launch status. A
+`setup_only` session, a lost connection or no team keeps, or brings back, the
+setup form. A renewal of the same session changes nothing, and neither does a
+session check (Check connection, the recovery after a refused read, or the
+hand-off's status check) that ends `ready` on the computer the parts answer came
+from: the answer and the form are kept through it, and no height, form or parts
+read is posted or sent. A check that ends anywhere else brings back the setup
+form. A parts refresh that is refused, lost or unusable keeps the answer already
+shown for that connection, so one failed read never takes the working form away.
+Focus that was in the panel moves to the parts, never into the composer. Rooms,
+Tasks and All agents are on; Team details, Recorder, search and bot equipment stay
+disabled, as in any connected view. The card's Disconnect and each message's
+Technical detail are reachable.
+
+The working form's computer already has a team, so its first-team panel is not
+offered anywhere in that form: it is detached from the page, not only hidden, and
+the card's disclosure no longer holds it: in that form the disclosure is labelled
+"Connection options" and drops its guided-setup paragraph. Whenever the view
+returns to the setup form the panel comes back, in the setup host or in the
+disclosure, labelled "Connection options and first-time setup" again.
+
+Messaging in the working form is reach for an existing grant, not new authority.
+With a message grant the person has approved on that computer (today the guide's
+"Allow messages from you to this team" step), the composer and the "Message"
+buttons beside bots send through the calls the carrier already admits
+(`action-context`, `action-send`, `action-receipt`). Without one the composer says
+"Messages: not authorized." and sends nothing. Nudges, task feedback and
+permission decisions cannot be sent over this connection: their preparation is
+refused locally. The form adds no request names, grants or server routes.
+
+**One team on one computer.** A connected view marks on `main` the computers it
+lists (`data-computers`, from `connected-workspace.js`), and `app.js` marks how
+many teams the view has, hidden ones included (`data-teams`), but only while the
+computers are marked. A view that lists no computers, before its account check
+or once it retires, has neither mark.
+Only when both are 1 does `workspace.css` fold the teams list and the parts strip
+to one line each, so the room takes the rest of the height. The teams line keeps
+the team's choice, with its status words, and the Bots in this team and
+Computers & status drawers. It leaves out All, Hide and the hidden-teams toggle,
+which change nothing with one team, and on a phone the Teams heading. A drawer
+opened on the line drops below it. On a wide screen the line, with an open
+drawer, takes at most a quarter of the column (15% while the composer is open)
+and scrolls inside itself, so the room keeps its heading, the conversation's
+floor and the Message team row at the website's smallest frame. With the composer
+and a drawer both open, the composer's room depends on what the room shows: at
+the smallest frames it can have less than without the fold, and then it scrolls
+inside itself as it does today. When Computers & status opens there, by attention or by the
+person, the line scrolls itself (never the page around the frame) to show the
+computer's card, from its name to its Connect, Check connection or Disconnect;
+when the line cannot show all of that, the buttons win. Opening Message team
+afterwards narrows the line, so it shows the card again. The parts strip keeps
+each part's name, status in words and mark, and stops scrolling on its own.
+
+Computers & status opens itself when its computer asks for attention
+(`onConnectionAttention`). In the fold, a drawer the page opened that way closes
+again when `connected-workspace.js` says that attention cleared
+(`onConnectionAttentionCleared`, once the computer that asked is `ready`), or, if
+the team is not known yet then, as soon as the fold shows. It stays open once the
+person has used it: a pointer press, a wheel or trackpad scroll, or focus in it
+(or a wheel or a press on the line itself, such as its scrollbar), or a close of
+their own.
+A drawer the person opened is never closed for them, and with more teams or
+computers nothing closes it. The fold sets no fixed or viewport height, so the
+Message team composer behaves above an on-screen keyboard as before. Any other
+count, and any view that is not a connected one (nothing marks its computers),
+keeps today's layout.
+
+After its ready message, the framed document observes its root element with
+`ResizeObserver`. Browsers deliver at most one notification per rendering
+frame, and in the setup form each one measures the document height. When the
+value changes, the document posts exactly
+`{type:"claudfather.workspace.size",version:1,height}` to the document's
+`shell_origin`, never `*`. `height` is a whole number of CSS pixels from 1 to
+20000. No other data crosses, and disposal stops observing. The website must
+accept the message only from its own frame window and the Plane origin, and must
+clamp it.
+
+The framed document also says which form it shows, so the website can size the
+frame for it. Under the browser carrier only, right after its ready message, it
+posts exactly `{type:"claudfather.workspace.form",version:1,form}` to the
+document's `shell_origin`, where `form` is `"setup"` or `"working"`, and posts it
+again only when the form changes; an unchanged form is never posted again, and
+nothing is posted after disposal. It carries nothing about the computer: no name,
+count or identifier. A website that does not know the message ignores it. The
+working form fills its window instead of growing with its
+content, so on entering it the document posts one fixed height of 640 and
+measures nothing while it lasts; going back to the setup form measures again.
+Native documents post no size and keep the full workspace.
+
 Website metadata reads have one eight-second total header/body deadline and a
 16KiB body bound. The visible document rechecks on visibility and every 30 seconds.
 A provider outage cannot create an admitted account context; a previously verified
@@ -243,6 +417,209 @@ and canonical host session admission determine current access, not client clock
 interpretation of that field. The connected-context marker is supplied by the separately verified publisher;
 this core entry does not mint or verify its document ticket.
 
+## A started computer's parts
+
+A `ready` session on a started computer offers the dashboard reads as before and
+one more read that needs no setup approval: the **parts read**, `POST
+/api/owner/connected/setup/state` with body `{}` (`setup-state`, input `{}`, on the
+SSH route and in the browser carrier's closed list). It is admitted by the
+connected session alone, checked before and after, and it writes nothing. It
+answers
+
+`{"version":1,"computer":"started"|"not_started","provider":{"state":"not_linked"|"linked","link":"available"|"not_here"},"team":{"state":"none"},"teams":<count>,"bots":[],"helper":{"state":"asleep"|"later"}}`
+
+`computer` is `started` for a computer started with no team (`start_state`) or
+one whose committed configuration lists a team; `teams` counts those teams. It
+is a count, not a running state: it is also true mid-Launch, after a failed
+Launch and after a stop, so the pane says "1 team set up" for exactly one team,
+never "running", and no status sentence for more (no plural is approved).
+`provider` is `linked` exactly when a Claude sign-in line with a value is saved
+in this computer's `.env` (`environment_linked`), under the same file checks every
+sign-in attempt already makes (`environment_ready`, unchanged); the line's value
+is never read out, and no approval and no attempt's record decides it. These read
+as `not_linked`: no `.env`; a `.env` that is not a single-link regular file of
+this user with mode 0600 and at most 64 KiB, or that changes while read; a line
+before the sign-in line that the check cannot read; an empty value
+(`CLAUDE_CODE_OAUTH_TOKEN=`, `''` or `""`); and an API key or Claude's own
+`claude login` files, which are not this line. `provider.link` says whether
+this computer takes a link approval (below): `available` on a Linux computer
+that `start_state` reads as `started` and where no team approval or Launch is
+retained, `not_here` on every other computer (one today's nine-card guide set
+up, one not started, a Mac, or one whose team tables cannot be read). It depends
+on no approval and no attempt, so it reads the same for a computer read after
+read; a view that finds no `link` key is talking to an older core. Every other
+byte of the answer is as it was before the key existed. `provider.signin` is
+present only while the computer holds a link approval (below) that has not
+lapsed unused and Claude is not linked; once linked it is left out. It is
+`{"generation","phase":"approved"|"waiting"|"ended","attempt_id","state","reason","code_sent","retryable","unconfirmed"}`:
+`approved` before the approval's first attempt (the attempt fields `null`,
+the flags false), `waiting` while its current attempt is starting or waiting
+with the sign-in lease held, else `ended`. `state` and `reason` are that
+attempt's, except that a starting or waiting attempt whose lease is free reads
+`unknown`/`interrupted`, as the status call reads it. `code_sent` says a code
+was delivered; `retryable` that a begin would now admit a new attempt under
+the same approval; `unconfirmed` that the attempt ended
+`unknown`/`child_quiet_unproven` and its lease is still held. It never holds a
+url, a code or a token: the url stays in the status call. A view resumes from
+this key alone. `team.state` is
+`launch_unfinished` while a team preparation that a Launch dispatched has not
+finished cleanly (its update record is not `done`, or is `done` with health
+errors), and when the update record cannot be read; otherwise `none`. A Preview
+nothing launched is never dispatched, so it reads `none`. `helper` is
+`asleep` until Claude is linked, then `later`. Later versions add keys and states
+inside a part and entries in `bots`; `version` stays 1 while nothing is removed
+or renamed.
+
+The pane (`workspace-parts.js`) sends the parts read once for each new `ready`
+connection to a shown computer, again whenever the window regains focus, and
+once when a read held back while the page followed a Launch is released.
+A renewal of the same session (`ready`, `renewing`, `ready`), or a session check
+that ends `ready` on the computer the answer came from, keeps the answer
+shown and sends no read; a connection change while a read is in flight is
+followed by one read for the new connection when it ends.
+Nothing else repeats it, nothing retries it, and the pane still connects only
+when the person chooses Connect. A `setup_only` session is never sent it. When the
+answer says `started`, the computer's parts show in the setup host: this
+computer, Claude, bots and, only when the embedding page names it, the helper.
+Each part is one element with `data-part` and `data-state`, a name, one status
+sentence and at most one control; the only control is a "Create a bot" that is
+visibly not available. With no team the parts are the whole view; with a team
+they stay as a strip above its teams. Over the browser carrier the five-step
+panel is the view only while the parts read has no answer or says `not_started`,
+and while that panel follows a launch in this page's lifetime: once this page
+sent a Launch or a launch status check, or followed a managed hand-off, the
+panel stays to its ending and no parts read is sent until that follow ends at a
+clean done receipt for the current request. A page opened again keeps
+the panel, with its Check launch status, while the parts read says
+`launch_unfinished`; once the Launch is done the parts show, and with a team the
+working form follows. Before that page
+reads anything, the panel shows what the computer said, for display only: the
+line that nothing runs yet is hidden, and with this browser's own request kept
+the approval step shows done. It sends, resumes and follows nothing. A browser
+with no request of its own shows approval as the step to check; Check setup
+approval reads the request, and Check launch status then follows it. A request kept in
+the browser's storage does not hold the panel by itself, so a Preview nothing
+launched never does.
+A refusal, a lost answer, an answer the pane cannot use, or a computer whose core
+has no parts read leaves the view exactly as it was.
+
+The connected document may carry `part_names`: an object whose keys are from
+`provider`, `bots` and `helper` (never a computer, which keeps its own saved
+name), and whose values are 1 to 40 ASCII letters and digits in words joined by
+one space or one hyphen, and that holds none of the view's own status sentences
+as whole words ("Linked", "Not linked", "None yet", "Coming soon", "Asleep until
+Claude is linked"), so a name cannot read like a status. The pane uses
+`part_names[<part>]` as that part's name when the whole field passes; anything
+else drops the whole field, never one name, and the document is still admitted.
+Without it the computer's saved name, "Claude" and "Bots" are used, and the
+helper row is not drawn: core holds no name for it. The browser carrier admits a
+document with the field and never sends it to the parent. A pane older than this
+refuses any document with the field, so the embedding page adds it only once it
+serves this pane.
+
+## A link approval for Claude sign-ins
+
+A started computer from the newer setup has no team approval and no team tables
+(`setup_metadata`, `setup_grant`, `setup_previews`). A **link approval** is one
+yes, on such a computer, to Claude sign-ins for a short time. Core records it
+only after a yes on the computer run's `link_provider` card, asked only with that
+run's link intent (`link_claude: true`, see the
+[website boundary](website-boundary.md#the-computer-runs-link-intent)); nothing
+a person sees changes until the website sends that intent.
+
+**The record.** One row in its own table, `setup_link(singleton, snapshot)`,
+never a `setup_grant` row: any team row makes the computer read as set up to the
+computer run, and a core without this record reads only the three team tables,
+so to it the computer still has no team setup. The snapshot holds exactly
+`generation` (a UUID string the writer makes), `binding_snapshot` (the active
+workspace binding, read inside the write), `installation` and `source_revision`
+(the active ones), `provider_signin` (the sign-in scope, as a team approval
+carries it), `created_at`, `unused_until` (`created_at` + 900) and `expires_at`
+(`created_at` + 1500). A row with any other key set, a non-UUID generation,
+other offsets, a time that is not a finite number or a scope of another shape
+does not read, and every door refuses it as unavailable. The approval is
+**spent** once an attempt row has its generation: that row is inserted in
+begin's own transaction, so a refused begin spends nothing, and nothing in the
+record changes, so every later admission of the same approval still matches.
+
+**The writer** runs in one write transaction and writes nothing when it refuses.
+In order: the owner's grant (`setup_denied`) and the active binding
+(`workspace_binding_required`, or `workspace_native_owner_required` when the
+owner is not a native one; both final for the run, a new run starts again); the
+installation and active revision (`setup_source_changed`); a retained team
+approval or Launch, by the computer run's own test (`use_full_guide`);
+`start_state` is `started` (`not_started`); the sign-in lease is free
+(`signin_live`, or `signin_unconfirmed` when the lease is held over an attempt
+that has ended). A worker in another process closes its lease a few
+milliseconds after its last row, so a lease held over an ended attempt other
+than `unknown`/`child_quiet_unproven` is probed again, up to 50 times 0.01
+seconds apart, and reads as free once released; the computer run's own check
+before its card and begin decide the same way. The writer waits inside its
+write transaction and begin inside its lock and write transaction, so no new
+attempt can be committed meanwhile (the computer run reads the attempt again
+after waiting); the wait is at most half a second, about two seconds under
+begin's lock at worst, and cannot deadlock, because a worker closes its lease
+outside that lock with no database write. A `starting` or `waiting` attempt
+with the lease free has ended (its worker is gone) and is left as it is. A new
+yes replaces the row.
+
+**The doors.** The four sign-in calls (`setup-signin-begin`, `-status`,
+`-code`, `-cancel`) keep their names and keys. On a computer that holds no link
+approval they are exactly today's team calls, in today's order: the team
+approval is admitted first, then the payload, so every answer is as before. On a
+computer that holds one, their door checks the headers, the principal, the
+connected session alone, the binding's issuer and origin, and the payload, then
+reads which approval the payload's `generation` names: with none of the team
+tables, the link approval; with some but not all, unavailable; with all three,
+the team approval when it is active and names that generation, and otherwise
+the link approval. The engine call follows (begin's own checks are below),
+then the principal again and the same approval's own admission with the
+approval it read. A link approval is admitted with the team approval's fences:
+the connected session, the row, the same binding, its time window, the exact
+approval, and no team approval or Launch retained; then the update fence
+(`managed_setup`), maintenance and the provider's pinned binary, as a team
+sign-in has. Admission reads only the database, never `start_state`: the
+worker re-admits about every 0.1 seconds. `setup-preview`, `-launch`,
+`-receipt` and `-context` never read a link approval, so they refuse its
+generation.
+
+**Begin under a link approval.** The same attempt ID again returns its status,
+as today. A new attempt, inside begin's write transaction and in this order:
+the approval is read again and must be the one admitted (a yes that landed
+since replaced it: `setup_denied`); while no attempt has its generation,
+`unused_until` must not have passed (`setup_denied`, as an expired approval);
+`start_state` is `started` (`not_started`; the writer and this are the only
+places a link sign-in reads it); then the current attempt. A current attempt
+that has ended while the sign-in lease is still held (after the same probes
+again as the writer's), or this process's own
+attempt that ended `unknown`/`child_quiet_unproven`, refuses
+`signin_unconfirmed`. Another approval's attempt that has not ended refuses
+`signin_live`; ended means a terminal row, or a starting or waiting row whose
+lease is free and whose worker is not this process's. Under the same approval
+today's retry rule holds (a retryable ending with no code sent, the attempt
+settled), and its cap counts only that approval's attempts (10); a new approval
+starts a new count, and the team approval still counts every attempt on the
+computer. Then today's window, scope and environment checks, and the lease. A
+link attempt that the service's own stop cancels ends `cancelled` with the
+reason `service_stopped`, not `effect_uncertain`; a team attempt still ends
+`effect_uncertain`.
+
+**The sign-in lease.** `state/provider-signin.lock`, one private file per
+computer (a regular file of this user, one link, mode 0600), never removed.
+Only a link sign-in takes it: begin, on the path that inserts a new attempt,
+inside its write transaction just before the insert, with non-blocking tries
+only; a refused or rolled-back begin releases it at once. The worker closes it
+after its last write and outside its lock; a worker whose child's reap is
+unproven keeps it until its own process exits. Workers run in the process that
+began them: the lasting service, or the process of an `owner-signin-v1`
+conversation over the SSH carrier. Any process can probe it
+without blocking: held means a sign-in may be live; a file that is absent or
+unlocked is free (the system releases a dead holder's lock); anything else (a
+link, another owner, another name, another mode) refuses as unavailable, never
+as free. A team sign-in takes no lease and is unchanged; the two cannot be live
+together, because the writer and the link admission refuse a retained team
+approval and begin refuses a current attempt of another approval.
+
 ## First-use workspace approval in the connected document
 
 An explicit “Approve workspace on this computer” control consumes the existing workspace challenge, maintained website host assertion, and host stage protocol. It never confirms a binding, initializes the host, grants fleet actions, or connects automatically. Disconnect a currently ready read session before starting enrollment. A successful staged proposal displays its short-lived code only in that computer’s panel, beside the intended workspace, issuer and hostname.
@@ -271,8 +648,11 @@ The entry routes an exact team from the admitted source roster. One transport
 boundary projects canonical raw host/actor/task/assignment IDs into the selected
 source's qualified UI IDs and team name, and reverses only that exact qualifier
 before the fixed connected action POST. Mixed sources, another host, changed
-scope or undeclared recipients refuse without a send. HTTP v1 message and v2 task
-metadata remain canonical and raw; the shared ActionState saves the corresponding
+scope or undeclared recipients refuse without a send. The v1 message context lists
+every declared bot and marks the team's configured manager, the lead the nudge and
+feedback contexts name, with `lead: true`; a view addresses a new message to that
+lead by default. HTTP v1 message and v2 task metadata remain canonical and raw;
+the shared ActionState saves the corresponding
 qualified metadata, original UUID and digest, never the body. Source qualifiers
 are `c-` plus the complete reference UUID interpreted as a base36 integer,
 without truncation. Display labels remain ordinal; removing/reordering another
@@ -300,6 +680,16 @@ label and raw team alias (for example Computer 1 / engineering). Recovery
 consumes its loss ticket only on an overview started after that loss; a stale
 healthy result cannot exhaust the later recovery refresh.
 
+A message sent through the connected carrier records where it came from on its
+request receipt, outside the request's intent: `provenance` is `{"carrier":
+"connected", "account": <the binding's subject>, "binding_revision": <its
+revision>}`, taken from the same binding snapshot the action's scope was checked
+against. It records the session that sent the message, not proof that a person
+typed it. A direct owner session and a message sent on the computer record none;
+the same request ID with and without it is the same request. The one other shape,
+`{"carrier": "setup_finish"}`, is accepted but not yet written. `request show`
+returns the field (and a `provenance` line when present); older receipts have none.
+
 
 ## First-team setup
 
@@ -310,47 +700,92 @@ reads. Every ordinary read/action still requires the bound recorder and its
 existing explicit action grants.
 
 An operator can explicitly approve **one** first-team setup with local
-`host owner allow-setup` (see its maintained help). Approval fixes the shipped
-`revenue-web-app` template, target fleet, repository, sealed release and native
-install directory, and pins the current owner/workspace binding. It lasts at most
+`host owner allow-setup` (see its maintained help). Approval binds the target
+fleet, managed source revision and native install directory to the current owner
+and workspace. The `revenue-web-app` template takes a repository. The
+`local-project` template takes a local project directory. Approval lasts at most
 24 hours. It authorizes the connected browser to author a goal, preview the
 canonical configuration plan, and explicitly launch that exact plan through the
 foreground owner server. Workspace approval alone grants none of this. Setup
 status and withdrawal use the local owner CLI. Expired/stale approvals require a
 new explicit approval; withdrawal never undoes already-started work. Browser
 receipt/session recovery is bounded by the same grant's expiry/revocation and
-current owner/workspace binding; it is not permanent journal authority. On expiry
-keep the original request UUID and plan ID. Locally inspect `host status --json`
-and `config diff PLAN_ID`; the retained exact journal is
-`ROOT/state/activations/REQUEST_UUID/activation.json` (read only), decoded/verified
-by `claudlobby.activation_state.read_activation(ROOT, REQUEST_UUID)`. A new
-approval does not authorize the browser to inspect the previous generation's
-journal. No receipt should be inferred from a new empty grant.
+current owner/workspace binding. After the grant expires, use the stable CLI
+and data root from installation to inspect the update on the computer.
 
-The finite connected setup routes are POST `context`, `preview`, `launch` and
+```sh
+"$CLI" --root "$DATA" host update status --json
+```
+
+Match the update's `request_id`, `config_fingerprint` and `target` to the
+prepared request, configuration fingerprint and source revision before reading
+its `phase`. A missing or different record leaves the original outcome unknown.
+A new approval only grants browser access to its own generation.
+
+The preview and launch flow uses POST `context`, `preview`, `launch` and
 `receipt` under `/api/owner/connected/setup/`, with the existing exact Origin,
 header-only session and private/no-store boundary. Optional setup tables are
 created only by local approval. Preview rejects other fleets and target overlay
 or project declarations; the whole-host plan must contain exactly the approved
-first fleet. The canonical plan identity, sealed release and input/output
-freshness checks remain unchanged. The preview expires after ten minutes, never
-later than its approval. No browser field selects the install directory.
+first fleet. Launch checks the rendered plan's inputs before reserving the
+update. The preview expires after ten minutes or when its approval expires,
+whichever comes first. No browser field selects the install directory.
+Launch restarts every bot its plan names in `effects.restart_bots`
+(`<fleet>/<bot>`), so the view's "Bots already running here restart briefly."
+shows above Launch team only when that list names a bot outside the approved
+fleet, or is not a list of names. Under the boundary above a first-team Preview
+names none, so the line does not show today.
 
-The browser saves the original UUID before one launch request. The authority
-store reserves that UUID/plan before canonical activation begins. Lost responses
-and receipt reloads inspect only that original journal. A canonical context
-request supersedes a conflicting saved tab request, retaining both identifiers
+The browser saves the approval generation, request ID, configuration fingerprint
+and source revision before launch. The owner service reserves the request ID and
+fingerprint before dispatch. After a lost response, the receipt reads the original
+managed update record. A canonical context request supersedes a conflicting
+saved tab request, retaining both identifiers
 for inspection. An explicit new generation clears stale blocking pending state;
 a same-generation null request never licenses retry. Compatible local reapproval
 retains content-checked ownership of its prior declaration, not authority to
 launch an expired preview; unrelated authored declarations cannot be overwritten.
-Receipts never replan, resume or resend activation. A reservation without a journal is **unknown**, requiring
-local operator investigation or a new explicit grant, not automatic gap filling.
+Receipts never replan, resume or resend activation. A reservation without an
+update record has an **unknown** outcome and requires local operator investigation.
 Current installation identity, private owner/workspace/session and the exact
 retained grant allow this receipt recovery even if partial activation left an
 unbound recorder. This grants no Plane-data read capability. New previews and
 launches retain the strict first-fleet boundary. Started canonical work stays
 owned and drained after response loss or server shutdown.
+
+When the guided team card carried the messages mark (its scope's grant holds
+`"messages": {"sender": "card"}` and its answer the `actor_alias`), the approval
+stores `{"alias": "human:<name>"}`. The name must be `human:` and 2 to 40 ASCII
+lowercase letters, digits and single hyphens, starting with a letter and not
+ending with a hyphen, and not a reserved word (`sender_alias_refusal`); otherwise
+the guide stops with `sender_name_refused` and nothing is approved. For that
+approval, `context` adds `"sends_goal": true`, and the Preview answer adds
+`"sends_goal": true`, `"finish": "page"` and the exact `goal`, which the view
+shows above Launch team; Launch approves that text. An unmarked approval answers
+exactly as before.
+
+After a healthy Launch, the guide's finish (`--_finish-setup`, run today by the
+setup page) does for a marked approval, instead of the three optional cards: it
+first checks, read-only, that the approval still stands for an active owner
+(otherwise it records `revoked` with reason `setup_withdrawn`, or `stale` with
+reason `stale_binding`, and reads or registers no name), and checks again inside
+the registration's admission just before the name is written; it then takes the card's name, or the first free `<name>-2` to `<name>-9` (the base cut
+to 38 characters) if a recorded person or bot already uses it; registers it;
+re-checks the approval, binding and owner and writes the message grant in one
+transaction; then, after the same checks plus the grant row, the goal against
+the launched configuration, and the computer's update record re-read at send
+time (still this Launch's, healthy, at the running revision), sends the Preview's goal to the lead once under a
+request id derived from the Launch's. It counts the goal sent only from a
+receipt whose sender, recipient and body match. One finish runs at a time
+(`state/setup-finish-<launch request id>.lock`); its record lives in the
+approval's Preview row, so running it again answers from that record and never
+grants or sends twice. Its answer is `{"state": "setup_complete", "request_id":
+..., "messages": {"state": "allowed"|"kept"|"name_taken"|"revoked"|"stale"|"in_progress",
+"reason": ..., "by": "page"|"terminal", "alias": ..., "renamed": ...,
+"goal": {"state": "sent"|"unknown"|"pending"|"not_sent", "reason": ...}}}`.
+It reports `allowed` only while the grant row holds; otherwise `revoked` with
+reason `messages_revoked`. The status run and `host owner setup-status` carry
+the same answer and the goal text under `setup`.
 
 The browser displays team/repository/goal and plan changes, with technical
 identifiers behind a disclosure. `active` is an observed canonical activation

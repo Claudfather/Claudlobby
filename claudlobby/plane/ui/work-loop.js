@@ -1,6 +1,6 @@
 import { runtimeFields, ActionState, rowKey, scopeKey, validContext, validTaskActionContext, validTaskActionTarget } from "./action-state.js";
-import { createPermissionPanel } from "./permission-panel.js";
-import { esc, ago, stateBlock } from "./panel-state.js";
+import { createPermissionPanel, taskPermissionSummary } from "./permission-panel.js";
+import { esc, ago, graphemePrefix, stateBlock } from "./panel-state.js";
 
 // One presentation for direct and embedded Plane. No transport is constructed
 // here: the default read-only client never supplies a write capability.
@@ -29,7 +29,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   let storage;
   try { storage = sessionStorage; } catch { storage = null; }
   const state = new ActionState(storage);
-  const permissions = createPermissionPanel({api,storage});
+  const permissions = createPermissionPanel({api, storage, onSummaryChange: paintPermissionSummary});
   const contextsByKind = new Map(), checkingReceipts = new Set();
   const actionRefreshEpochs = new Map(), deniedContexts = new Set(), checkingTaskContexts = new Set();
   const deniedNote = 'Action access is not authorized for this team. Reading remains available. The host owner must approve action access.';
@@ -46,7 +46,11 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   let selected = null, target = null, kind = "message", sending = false, inFlightRequest = null, opener = null, openerIdentity = null, readsPaused = false;
   let view = "channel";
   let notice = "Choose a team to see its available actions.";
-  root.innerHTML = `<details id="work-composer" open><summary id="work-composer-toggle"><span id="work-composer-label">Message team</span><span id="work-composer-status"></span></summary>
+  // The composer starts folded to its summary row (a native disclosure: reachable and announced), so the
+  // conversation keeps the screen. It opens from its summary, Message bot or a task action, and coming
+  // back from Tasks restores the state it was left in. composerKept: open when the person went to Tasks.
+  let composerKept = false;
+  root.innerHTML = `<details id="work-composer"><summary id="work-composer-toggle"><span id="work-composer-label">Message team</span><span id="work-composer-status"></span></summary>
     <div class="work-loop-head"><p id="work-scope"></p><span id="work-mode" class="tag"></span></div>
     <button id="work-manager" class="pill ghost" type="button" hidden>Talk to manager</button>
     <p id="work-unavailable" class="note"></p>
@@ -87,7 +91,20 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     <div id="work-recoverable"></div>
     <button id="work-clear-saved" class="pill ghost" type="button" hidden>Clear unreadable saved requests</button></details>`;
   const $ = id => document.getElementById(id);
-  $("work-composer").open = true;
+  // On a phone the folded row waits at the bottom of the screen; opened, the composer returns to the end
+  // of the page, so bring it into view. Elsewhere it is already in view and nothing moves.
+  $("work-composer").addEventListener("toggle", () => { if ($("work-composer").open) root.scrollIntoView?.({ block: "nearest" }); });
+  // The folded row's real height, for the phone page's scroll padding (workspace.css), so focus never lands under it.
+  if (typeof globalThis.ResizeObserver === "function") new globalThis.ResizeObserver(() =>
+    document.documentElement?.style?.setProperty("--work-loop-height", `${root.offsetHeight}px`)).observe(root);
+  // Where the composer scrolls inside its own box (wide screens), keep a send's result line in sight in that box.
+  // Only the composer's own scroll position moves; the page never does.
+  function revealNotice() {
+    const line = $("work-notice"), box = root.getBoundingClientRect?.(), at = line.getBoundingClientRect?.();
+    if (!box || !at || !line.textContent || root.scrollHeight <= root.clientHeight) return;
+    if (at.bottom > box.bottom) root.scrollTop += at.bottom - box.bottom;
+    else if (at.top < box.top) root.scrollTop -= box.top - at.top;
+  }
   const row = () => context && target ? { ...(context.version === 2 ? { version: 2 } : {}), scope: context.scope, kind, target } : null;
   const requestContext = request => {
     const value = contextsByKind.get(request.kind);
@@ -98,7 +115,18 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     ["workspace", "host", "fleet"].every(field => value.scope[field] === request.scope[field])))
     || retainedScopes.has(scopeKey(request.scope));
   const selectionKey = () => row() ? rowKey(row()) : "";
-  const leadId = c => (c.recipients.find(r => r.lead) || c.recipients[0]).id;
+  // The lead: the one this context marks, else the one this team's task contexts name; otherwise its first bot.
+  const leadId = c => (c.recipients.find(r => r.lead) || c.recipients.find(r => r.id === managerRecipient()) || c.recipients[0]).id;
+  // A message target this view chose (the lead, else the first bot) until the person chooses a bot or writes.
+  // Only a bot the person chose or wrote to is remembered for the team; a default is chosen again each time.
+  let defaultTarget = null;
+  function messageTarget(value) {
+    const remembered = messageRecipients.get(scopeKey(value.scope));
+    if (value.recipients.some(r => r.id === remembered)) return { recipient: remembered, task_id: null };
+    return defaultTarget = { recipient: leadId(value), task_id: null };
+  }
+  const rememberRecipient = scope => target === defaultTarget ? messageRecipients.delete(scopeKey(scope))
+    : messageRecipients.set(scopeKey(scope), target.recipient);
   const readDraft = () => row() ? state.draft(row()) : "";
   const roomLabel = value => api.roomLabel?.(value) || value;
   function paintComposer() {
@@ -111,8 +139,9 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   }
   function setView(next) {
     if (view === next) return;
-    view = next;
-    $("work-composer").open = view !== "tasks";
+    const leaving = view; view = next;
+    if (view === "tasks") { composerKept = $("work-composer").open; $("work-composer").open = false; }
+    else if (leaving === "tasks") $("work-composer").open ||= composerKept;
     // Only presentation changes: the mounted form and its action selection stay
     // intact. Do not leave keyboard focus inside a newly collapsed composer.
     if (!$("work-composer").open && root.contains(document.activeElement)) $("work-composer-toggle").focus();
@@ -227,7 +256,8 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       : deniedContexts.size ? deniedNote
       : "Browser actions are unavailable for this view. Check the task and activity panels for read status.";
     if (usable) {
-      const options = context.recipients.map(r => `<option value="${esc(r.id)}">${esc(r.label)}${r.lead ? " · lead" : ""}</option>`).join("");
+      // A lead whose name already says lead is not marked again ("lead · lead").
+      const options = context.recipients.map(r => `<option value="${esc(r.id)}">${esc(r.label)}${r.lead && r.label.toLowerCase() !== "lead" ? " · lead" : ""}</option>`).join("");
       if ($("work-recipient").innerHTML !== options) $("work-recipient").innerHTML = options;
       $("work-recipient").value = target.recipient;
       $("work-recipient").disabled = kind !== "message";
@@ -278,7 +308,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       retainPresentation();
       if (kind === affectedKind) {
         saveDraft(); ++compositionEpoch;
-        if (kind === "message" && target?.task_id === null) messageRecipients.set(scopeKey(affected.scope), target.recipient);
+        if (kind === "message" && target?.task_id === null) rememberRecipient(affected.scope);
         context = null; target = null; targetTitle = null; $("work-body").value = "";
         // Restore the independent message draft without retargeting a task action.
         if (["nudge", "feedback"].includes(affectedKind)) {
@@ -286,8 +316,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
           const messageContext = contextsByKind.get("message");
           if (messageContext) {
             context = messageContext;
-            const remembered = messageRecipients.get(scopeKey(context.scope));
-            target = { recipient: context.recipients.some(r => r.id === remembered) ? remembered : leadId(context), task_id: null };
+            target = messageTarget(context);
             $("work-body").value = readDraft();
           }
         }
@@ -323,7 +352,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     saveDraft();
     retainPresentation();
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
-      messageRecipients.set(scopeKey(context.scope), target.recipient);
+      rememberRecipient(context.scope);
     ++epoch;
     contextsByKind.clear(); deniedContexts.clear(); checkingTaskContexts.clear(); ++compositionEpoch;
     context = null; target = null; targetTitle = null;
@@ -353,8 +382,12 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       if (!taskKind && kind === "message" && !target && !contextsByKind.has("message")) $("work-recipient").value = leadId(value);
       if (kind === "message" && contextsByKind.has("message") && !target) {
         context = contextsByKind.get("message");
-        const remembered = messageRecipients.get(scopeKey(context.scope));
-        target = {recipient:context.recipients.some(r => r.id === remembered) ? remembered : leadId(context),task_id:null};
+        target = messageTarget(context);
+        paint({ restoreDraft: true });
+      } else if (taskKind && kind === "message" && target && target === defaultTarget && context === contextsByKind.get("message")
+          && !$("work-body").value && !sending && leadId(context) !== target.recipient) {
+        // A lead first named by a task context takes over a default the person has not changed or written to.
+        ++compositionEpoch; target = defaultTarget = { recipient: leadId(context), task_id: null };
         paint({ restoreDraft: true });
       }
       notice = value.simulation ? "Example actions are recorded only by the test service. No real agents receive them." : "";
@@ -368,7 +401,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (room === (fleet || "all")) retainPresentation();
     else { retainedScopes.clear(); retainedComposition = null; }
     if (context?.actions.includes("message") && kind === "message" && target?.task_id === null)
-      messageRecipients.set(scopeKey(context.scope), target.recipient);
+      rememberRecipient(context.scope);
     const token = ++epoch, selectedRoom = fleet || "all";
     ++compositionEpoch; room = selectedRoom; readsPaused = false;
     contextsByKind.clear(); deniedContexts.clear(); checkingTaskContexts.clear(); context = null; target = null; targetTitle = null; kind = "message";
@@ -495,29 +528,40 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       text = prose(task.history?.find(same));
     }
     if (!text) return `<p class="detail-empty">${closed ? "Result" : "Update"} text is not available in this snapshot. Open task details below to inspect the recorded reports and history.</p>`;
-    if (text.length <= 1000) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
-    return `<p class="note">${closed ? "Result" : "Update"} excerpt (first 1,000 characters).</p>
-      <pre class="task-record-body task-result">${esc(text.slice(0, 1000))}…</pre>
-      <details class="task-record-details"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body">${esc(text)}</pre></details>`;
+    const preview = graphemePrefix(text, 1000);
+    if (preview === text) return `<pre class="task-record-body task-result">${esc(text)}</pre>`;
+    return `<details class="task-record-details task-result-disclosure"><summary>Read full ${closed ? "result" : "update"}</summary><pre class="task-record-body task-result">${esc(text)}</pre></details>
+      <div class="task-result-preview"><p class="note">${closed ? "Result" : "Update"} excerpt (first 1,000 characters).</p>
+      <pre class="task-record-body task-result">${esc(preview)}…</pre></div>`;
+  }
+  function paintPermissionSummary(summary) {
+    const status = $("task-permission-summary");
+    if (!status) return;
+    if (status.textContent !== summary) status.textContent = summary;
+    status.hidden = !summary;
   }
   function renderDetail(task, boardOnly, unavailable = null) {
     paintAccess();
     const content = $("task-detail-content");
     const lastEvent = task.last_event || task.history?.at(-1);
     const assignment = task.current_assignment;
+    const factsAfterResult = task.state === "completed" && task.resolved === true && !boardOnly && !unavailable;
+    const assignmentFacts = `<dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assigneeLabel(assignment))}</dd>
+      <dt>Last recorded action</dt><dd>${esc(lastEvent?.event || "No action recorded")} · ${esc(ago(lastEvent?.occurred_at))}</dd>
+      <dt>Current assignment delivery</dt><dd>${esc(!assignment ? "No current assignment to check."
+        : task.delivery?.integrity || "Delivery of the current assignment is not confirmed in this view.")}</dd></dl>`;
     content.innerHTML = `<p class="eyebrow">${esc(roomLabel(task.fleet || "Team not recorded"))} · TASK</p>
       <h2 id="task-detail-title">${esc(task.title || "Recorded task")}</h2>
       <p class="task-state"><b>${esc(task.state || "State unknown")}</b></p>
+      <p id="task-permission-summary" class="task-question" role="status" hidden></p>
       ${unavailable ? stateBlock(unavailable.state || "unavailable", unavailable.provenance, unavailable.remediation) : ""}
-      <dl class="task-facts"><dt>Assigned to</dt><dd>${esc(assigneeLabel(assignment))}</dd>
-      <dt>Last recorded action</dt><dd>${esc(lastEvent?.event || "No action recorded")} · ${esc(ago(lastEvent?.occurred_at))}</dd>
-      <dt>Current assignment delivery</dt><dd>${esc(!assignment ? "No current assignment to check."
-        : task.delivery?.integrity || "Delivery of the current assignment is not confirmed in this view.")}</dd></dl>
+      ${factsAfterResult ? "" : assignmentFacts}
       ${task.attention_question || task.attention_reason?.includes("escalated") ? `<div class="task-question"><b>Needs your input</b><pre class="task-record-body">${esc(task.attention_question || "The question was not recorded.")}</pre></div>` : ""}
       ${task.resolved === false ? '<p class="task-question">Task history has unresolved links. Its result cannot be treated as confirmed.</p>' : ""}
       ${boardOnly ? '<p class="note">Showing a limited board snapshot. Full task detail is unavailable in this view.</p>' : `
       <h3>${["completed", "failed", "cancelled"].includes(task.state) ? "Recorded result" : "Latest recorded update"}</h3>${recordedResult(task)}
       <p class="note">This is a task snapshot. Completion alone does not mean the result was reviewed.</p>`}
+      ${factsAfterResult ? assignmentFacts : ""}
       <h3>Feedback and conversation</h3><p class="note">Comments and replies appear first; recorded reports follow. This is the recent channel window, not a complete task history.</p>
       <button id="task-conversation-update" class="pill ghost" type="button" hidden>New conversation available</button>
       <p id="task-lineage-note" class="note" hidden></p>
@@ -542,6 +586,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
       ${(task.issues || []).length ? `<h3>History issues</h3><ul>${task.issues.map(i => `<li>${esc(i.code)}${i.blocking ? " · unresolved" : " · historical"}</li>`).join("")}</ul>` : ""}
       ${task.issues_window?.truncated ? '<p class="note">Additional history issues are omitted from this bounded view.</p>' : ""}</details>`}
       <p class="note">Task state, history, recorded reports and action selection are a snapshot. Use Refresh to read them again.</p>`;
+    paintPermissionSummary(taskPermissionSummary(task));
     detailSnapshot = { task: Object.freeze({ ...task, ...(Object.hasOwn(task, "current_assignment")
       ? { current_assignment: task.current_assignment && Object.freeze({ ...task.current_assignment }) } : {}) }), boardOnly };
     if (!boardOnly) void permissions.show($("task-permissions"),task);
@@ -655,7 +700,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         const nextKind = button.dataset.kind, nextContext = capability(nextKind);
         if (!nextContext) return;
         saveDraft(); ++compositionEpoch;
-        if (kind === "message" && target?.task_id === null) messageRecipients.set(scopeKey(context.scope), target.recipient);
+        if (kind === "message" && target?.task_id === null) rememberRecipient(context.scope);
         kind = nextKind; context = nextContext; targetTitle = task.title;
         target = context.version === 2 ? frozenTaskTarget(task, context, boardOnly, kind) : { recipient: leadId(context), task_id: task.task_id };
         composerTask = { selection: Object.freeze({ ...selected }), room, epoch, context, target };
@@ -729,6 +774,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   $("task-detail-close").onclick = closeDetail;
   $("task-detail-refresh").onclick = () => { ++compositionEpoch; detail(); $("task-detail-refresh").hidden = true; };
   dialog.addEventListener("close", () => {
+    permissions.close();
     ++detailEpoch; pendingDetail = null;
     paintAccess();
     $("task-detail-content").innerHTML = "";
@@ -749,7 +795,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
     if (focusTarget === rail || focusTarget === $("channel")) focusTarget.tabIndex = -1;
     focusTarget.focus(); opener = null; openerIdentity = null;
   });
-  $("work-body").addEventListener("input", () => { ++compositionEpoch; saveDraft(); paintComposer(); });
+  $("work-body").addEventListener("input", () => { ++compositionEpoch; defaultTarget = null; saveDraft(); paintComposer(); });
   $("work-check-access").onclick = async () => {
     if (!canCheckAccess()) return;
     const token = epoch, selectedRoom = room, missing = missingAccess();
@@ -779,8 +825,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
   $("work-reset").onclick = () => {
     const message = contextsByKind.get("message"); if (!message) return;
     saveDraft(); ++compositionEpoch; context = message; kind = "message"; targetTitle = null;
-    const remembered = messageRecipients.get(scopeKey(context.scope));
-    target = {recipient:context.recipients.some(r => r.id === remembered) ? remembered : leadId(context),task_id:null};
+    target = messageTarget(context);
     notice = ""; paint({ restoreDraft: true }); $("work-body").focus();
   };
   const requestLabel = request => `${request.kind} to ${recipientLabel(request)}${request.target.task_id ? ` · task ${request.target.task_id}` : ""}`;
@@ -839,7 +884,7 @@ export function mountWorkLoop({ api, renderThread, refresh, onActionsChange = ()
         : originContext.version === 2 ? originContext.actions[0] === "feedback" ? "Task feedback was not sent. Your comment is kept; refresh the task and select feedback again." : "Task nudge was not sent. Your reason is kept; refresh the task and select its nudge again." : error.message;
     } finally {
       sending = false; inFlightRequest = null;
-      paint({ restoreDraft });
+      paint({ restoreDraft }); revealNotice();
     }
   };
   $("work-clear-saved").onclick = () => {

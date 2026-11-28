@@ -20,6 +20,10 @@ def _lines(view) -> tuple[str, ...]:
         proof = attempt.proof.status if attempt.proof is not None else "not_available"
         lines.append(f"transmission {attempt.attempt_no}\ttransport={transport}\t"
                      f"recorded={attempt.recorded_status}\trecording_proof={proof}")
+    if view.provenance is not None:
+        lines.append("provenance\t" + "\t".join(f"{key}={view.provenance[key]}"
+                                                 for key in ("carrier", "account", "binding_revision")
+                                                 if key in view.provenance))
     return tuple(lines)
 
 

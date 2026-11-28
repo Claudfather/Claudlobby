@@ -64,8 +64,18 @@ def _validate_roster(root: Path, contexts: dict, payload: dict) -> None:
 
 
 def identity_bindings_from_registry(plan: RenderedConfiguration, registry: list[dict], *,
-                                    package: PackageResources) -> dict:
-    """Retain existing registry results against exact frozen fleet inputs; never mint."""
+                                    package: PackageResources) -> dict | None:
+    """Retain existing registry results against exact frozen fleet inputs; never mint.
+
+    A computer with no team binds no identities: its committed configuration
+    holds None, at its start and at every update while it has no team.
+    """
+    if not plan.fleets:
+        if registry != []:
+            raise ActivationError("candidate registry bindings do not cover the frozen fleets")
+        if package.installation is None or package.installation.data_root != plan.data_root:
+            raise ActivationError("current identity bindings require this data root's managed Git installation")
+        return None
     if (not isinstance(registry, list) or len(registry) != len(plan.fleets)
             or any(not isinstance(row, dict) or not isinstance(row.get("fleet"), str)
                    or not isinstance(row.get("bindings"), dict)
@@ -128,7 +138,8 @@ def scan_registry(plan: RenderedConfiguration, *, package: PackageResources,
     A partial or unknown scan keeps its original exception and receipt evidence;
     this owner never retries it or publishes a current configuration.
     """
-    if not plan.fleets or len(set(plan.fleets)) != len(plan.fleets):
+    # An empty roster is a scan with nothing to scan (a computer with no team).
+    if len(set(plan.fleets)) != len(plan.fleets):
         raise ActivationError("candidate registry requires an unambiguous frozen fleet roster")
     if package.installation is None or package.installation.data_root != plan.data_root:
         raise ActivationError("current identity bindings belong to another data root")
@@ -151,7 +162,7 @@ def scan_registry(plan: RenderedConfiguration, *, package: PackageResources,
     return rows
 
 
-def read_registry_identity_bindings(plan: RenderedConfiguration, *, package: PackageResources) -> dict:
+def read_registry_identity_bindings(plan: RenderedConfiguration, *, package: PackageResources) -> dict | None:
     """Read already registered identities for frozen fleets; no scan, repair or write."""
     rows = []
     for name in plan.fleets:

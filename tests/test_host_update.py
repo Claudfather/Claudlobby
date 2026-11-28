@@ -171,3 +171,64 @@ def test_current_timer_enters_public_owner_before_any_update(tmp_path, script, c
     result = subprocess.run(["bash", str(REPO / "claudlobby/_runtime_scripts" / script),
         "--selected-release", "wrong-release"], env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 2 and not called.exists()
+
+
+def _npm_stub(tmp_path):
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "npm-called"
+    _write_exec(bin_dir / "npm", f"#!/bin/sh\necho \"$@\" >> {marker}\n")
+    return bin_dir, marker
+
+
+@pytest.mark.parametrize("npm", ["stub", "absent"])
+@pytest.mark.parametrize("scheduled", [False, True])
+def test_a_computer_with_no_team_updates_no_claude(tmp_path, monkeypatch, npm, scheduled):
+    """claude-update, through `host update runtime`, calls no installer when there is no team."""
+    from claudlobby import host_update_operations as updates
+    from claudlobby.commands import host_update
+    from tests.no_team_start import Case
+
+    case = Case(tmp_path, monkeypatch)
+    case.start()
+    case.admit()
+    bin_dir, marker = _npm_stub(tmp_path)
+    bound = []
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin" if npm == "stub" else "/usr/bin:/bin")
+    if scheduled:
+        # The timer's own call still binds its committed unit first; that
+        # binding has its own tests above, so here it answers for the unit.
+        monkeypatch.setattr(updates, "_bind_git_job", lambda release, name: bound.append(name) or (
+            None, SimpleNamespace(environment=()), None, None))
+        monkeypatch.delenv("CLAUDLOBBY_STAGED_CLAUDE_UPDATE_ENABLED", raising=False)
+        monkeypatch.setenv("CLAUDLOBBY_UPDATE_SCHEDULED", "1")
+    calls = []
+    original = subprocess.run
+    def run(argv, **kwargs):
+        if argv[0] == "git": return original(argv, **kwargs)
+        calls.append(argv)
+        return original(argv, **kwargs)
+    monkeypatch.setattr(updates.subprocess, "run", run)
+    result = host_update.dispatch(SimpleNamespace(
+        public_command="host.update.runtime", fleet=None, seed=None, root=str(case.root), dry_run=False))
+    assert calls == [] and not marker.exists()
+    assert bound == (["claude-update"] if scheduled else [])
+    assert result.data["outcome"] == "no_fleet" and result.data["source_revision"] == case.target
+    assert result.lines == ("runtime update: no fleet on this computer — nothing to update.",)
+
+
+def test_a_computer_with_a_team_still_reaches_the_claude_updater(current_runtime, monkeypatch):
+    from claudlobby import host_update_operations as updates
+    root, installation, _, host = current_runtime
+    assert host.snapshot["fleets"]
+    monkeypatch.setattr(updates, "resolve_env_tiers", lambda paths: {})
+    calls = []
+    original = subprocess.run
+    def run(argv, **kwargs):
+        if argv[0] == "git": return original(argv, **kwargs)
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(updates.subprocess, "run", run)
+    result = updates.run_host_update(root, "runtime")
+    assert calls == [[str(installation.native / "update-claude-code.sh"), "--admitted-runtime"]]
+    assert result.outcome == "tick_completed"

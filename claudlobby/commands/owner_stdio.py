@@ -25,7 +25,8 @@ IDLE_SECONDS = 300
 ADMISSION_SECONDS = 1800
 _ACTIONS = frozenset(("prepare_directories", "initialize_owner", "pair_owner",
     "initialize_workspace", "initialize_connected", "bind_workspace", "provider_signin",
-    "allow_setup", "actor_alias", "register_actor", "allow_messages", "install_provider"))
+    "allow_setup", "actor_alias", "register_actor", "allow_messages", "install_provider",
+    "start_workspace", "initialize_link_storage", "link_provider"))
 _BASE = {"version", "type", "seq", "session_id"}
 _FIELDS = {
     "start": {"profile", "expected_uid", "source_revision", "binding_sha256", "finish_setup"},
@@ -35,9 +36,13 @@ _FIELDS = {
 
 
 class StdioRefused(Exception):
-    """Finite redacted refusal, never raw input, configuration or child output."""
-    def __init__(self, code="invalid_request"):
+    """Finite redacted refusal, never raw input, configuration or child output.
+
+    ``data`` is the computer run's ``start_failed`` only: core's line and the
+    record's request id, sent in the error frame beside the code."""
+    def __init__(self, code="invalid_request", *, data=None):
         self.code = code
+        self.data = dict(data or {})
         super().__init__(code)
 
 
@@ -83,7 +88,9 @@ class OwnerStdio:
         self._began = time.monotonic()
         self._closed = False
         self._pending = None
+        self._named = False
         self._partial_since = None
+        self._extra = {}
 
     def emit(self, kind, **body):
         if kind not in {"hello", "proposal", "state", "result", "error"}:
@@ -141,9 +148,11 @@ class OwnerStdio:
             value = json.loads(raw, object_pairs_hook=_unique,
                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
             kind = value.get("type") if isinstance(value, dict) else None
-            fields = _BASE | _FIELDS.get(kind, set())
-            if kind == "decide" and self._pending == "actor_alias":
+            fields = _BASE | _FIELDS.get(kind, set()) | self._extra.get(kind, set())
+            if kind == "decide" and (self._pending == "actor_alias" or self._named):
                 fields |= {"actor_alias"}
+            if kind == "start" and "update_record" in self._extra.get("start", ()) and "link_claude" in value:
+                fields |= {"link_claude"}  # The computer run's link intent: sent only when true.
             if (kind not in _FIELDS or set(value) != fields or _wire(value) != raw + b"\n"
                     or type(value["version"]) is not int or value["version"] != 1
                     or type(value["seq"]) is not int or value["seq"] != self._input_seq + 1
@@ -166,7 +175,12 @@ class OwnerStdio:
             self._closed = True
             raise
 
-    def start(self):
+    def start(self, *, computer=False):
+        """``computer``: the computer run's start, which also carries ``update_record``:
+        null, or the request id and target of the update record the client read; and,
+        only with the link intent, ``link_claude``, which is only ever ``true``."""
+        if computer:
+            self._extra = {"start": {"update_record"}}
         value = self._read({"start"})
         if (value["profile"] != "owner-setup-v1" or type(value["expected_uid"]) is not int
                 or not 0 < value["expected_uid"] < 2**32 - 1
@@ -183,6 +197,14 @@ class OwnerStdio:
                 _setup_binding(value["finish_setup"])
             except (InstallationError, TypeError):
                 raise StdioRefused() from None
+        if computer:
+            known = value["update_record"]
+            if value["finish_setup"] is not None or value.get("link_claude", True) is not True or known is not None and (
+                    type(known) is not list or len(known) != 2 or not all(isinstance(v, str) for v in known)
+                    or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                                    known[0]) is None
+                    or re.fullmatch(r"[0-9a-f]{40}", known[1]) is None):
+                raise StdioRefused()
         return value
 
     def approve(self, action, scope, *, original=True, expires_at=None):
@@ -195,6 +217,9 @@ class OwnerStdio:
         digest = hashlib.sha256(_wire(proposal).rstrip(b"\n")).hexdigest()
         identifier = uuid4().hex
         self._pending = action
+        # The team card with the messages mark: its answer carries the name the team will see.
+        self._named = (action == "allow_setup" and isinstance(scope, dict) and isinstance(scope.get("grant"), dict)
+                       and scope["grant"].get("messages") == {"sender": "card"})
         try:
             self.emit("proposal", proposal_id=identifier, digest=digest, proposal=proposal)
             value = self._read({"decide"}, expires_at=expiry)
@@ -208,9 +233,15 @@ class OwnerStdio:
                 if not isinstance(value["actor_alias"], str) or not _valid_human_alias(value["actor_alias"]):
                     raise StdioRefused()
                 return value["actor_alias"]
+            if self._named:
+                from ..operation_context import sender_alias_refusal
+                if sender_alias_refusal(value["actor_alias"]) is not None:
+                    raise StdioRefused("sender_name_refused")
+                return value["actor_alias"]
             return original
         finally:
             self._pending = None
+            self._named = False
 
     def token(self, kind):
         if kind not in {"pairing", "workspace"}:
@@ -323,14 +354,19 @@ def _admit(args, request):
 def _status(paths, store, *, profile=None):
     from dataclasses import asdict
     from ..git_update import read_update
-    from ..plane.owner_setup import OwnerSetup
+    from ..plane.owner_setup import OwnerSetup, retained_fields
     retained = OwnerSetup(store).retained_state() if os.path.lexists(store.path) else None
     record = read_update(paths.package.installation)
     owner = store.current_grant() if os.path.lexists(store.path) else None
     operation = None if record is None else {key: record.get(key) for key in (
         "phase", "request_id", "config_fingerprint", "target", "maintenance", "config_committed")}
     value = {"state": "status", "owner": asdict(owner) if owner else None,
-            "setup": asdict(retained) if retained else {"state": "absent"}, "operation": operation}
+            "setup": retained_fields(retained) if retained else {"state": "absent"}, "operation": operation}
+    from .host_owner_setup import card_status
+    card = card_status(store, retained) if retained else None
+    if card is not None:
+        # A marked approval: its finish answer (None before the finish) and the launched goal.
+        value["setup"].update(card)
     if profile is not None:
         from ..provider_install import status
         value["provider"] = asdict(status(profile.account_name, profile.uid))
@@ -343,14 +379,27 @@ def dispatch(args):
     from ..command_result import CommandFailure
     from ..plane.owner_access import OwnerAccess, AccessDenied, AccessUnavailable
     from .owner_setup_consent import FixedOwnerProfile, StdioGuideConsent
-    from .host_owner_setup import run, interrupted
+    from .host_owner_setup import run, run_computer, interrupted
     channel = OwnerStdio(0, 1)
+    computer = getattr(args, "stdio_computer", False) is True
+    data = {}
     try:
         channel.hello()
         _selectors(args)
-        request = channel.start()
+        request = channel.start(computer=True) if computer else channel.start()
         paths = _admit(args, request)
-        profile = FixedOwnerProfile(paths, request)
+        profile = FixedOwnerProfile(paths, request, computer=True) if computer else FixedOwnerProfile(paths, request)
+        # The managed Mac runtime has no admitted HTTPS ingress: its guide is
+        # the explicit SSH-controlled lifecycle. Capture the server tuple here,
+        # before the fixed profile replaces the environment; a missing or
+        # ambiguous one refuses rather than falling back to another transport.
+        ssh = None
+        if profile.runtime is not None and not args.stdio_status:
+            from ..plane.owner_ssh import SSHSessionSource
+            try:
+                ssh = SSHSessionSource.capture()
+            except AccessDenied:
+                raise StdioRefused("owner_ssh_source_refused") from None
         with profile.environment(), interrupted():
             store = OwnerAccess(paths.root)
             if args.stdio_status:
@@ -359,11 +408,18 @@ def dispatch(args):
             configured = SimpleNamespace(**vars(args))
             configured.finish_setup = request["finish_setup"]
             consent = StdioGuideConsent(channel)
-            result = run(configured, paths, store, None, consent=consent, profile=profile)
+            if computer:
+                configured.update_record = request["update_record"]
+                configured.link_claude = request.get("link_claude") is True
+                result = run_computer(configured, paths, store, consent=consent, profile=profile,
+                                      **({"ssh": ssh} if ssh is not None else {}))
+            else:
+                result = run(configured, paths, store, None, consent=consent, profile=profile,
+                             **({"ssh": ssh} if ssh is not None else {}))
             channel.emit("result", **result.data)
         return 0
     except StdioRefused as exc:
-        code = exc.code
+        code, data = exc.code, exc.data
     except CommandFailure as exc:
         code = exc.error.code
     except (AccessDenied, AccessUnavailable, OSError, ValueError, ImportError, TimeoutError):
@@ -373,7 +429,7 @@ def dispatch(args):
     except Exception:
         code = "internal_error"
     try:
-        channel.emit("error", code=code, state="stopped", retry=False,
+        channel.emit("error", code=code, state="stopped", retry=False, **data,
             **({"next": "inspect_status"} if code.startswith("provider_install_") or code == "interrupted_unknown" else {}))
     except (StdioRefused, OSError):
         pass

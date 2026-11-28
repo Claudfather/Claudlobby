@@ -36,7 +36,11 @@ def dispatch(args) -> CommandOutput:
             provenance = runtime_provenance(release)
             fleet_names = tuple(release.snapshot["fleets"])
             if not fleet_names:
-                raise PlanError("current configuration has no fleets to sweep")
+                # A computer started with no team has no assignment to expire.
+                return CommandOutput({"dry_run": args.dry_run, "expired": 0, "fleets": [],
+                                      "recording": "not_needed", **provenance},
+                                     release_id=release_id,
+                                     lines=("attention: no fleet — nothing to sweep",))
             stamp = datetime.now(timezone.utc)
             path = db_file(root)
             if not path.exists():

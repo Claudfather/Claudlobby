@@ -79,11 +79,8 @@ import uuid
 
 PROFILE_ID = "darwin15-arm64-py31216-git2561-tmux38-jq182-v1"
 LIMIT = 16384
-BUDGET = 900
-_INHERITED_LOCK_FD = None
 ALIASES = {"python3": "../python/bin/python3.12", "git": "../git/bin/git",
            "tmux": "../tmux/bin/tmux", "jq": "../jq/bin/jq"}
-CA_MEMBER = "lib/python3.12/site-packages/pip/_vendor/certifi/cacert.pem"
 # BEGIN FIXED DESCRIPTOR
 _DESCRIPTOR = {
     "artifacts": {
@@ -179,15 +176,6 @@ def _uuid(value):
         return False
 
 
-def validate_request(operation, value):
-    _require(operation in ("prepare", "status", "discard"), "invalid_operation")
-    _require(type(value) is dict and set(value) == {"schema_version", "request_id", "expected_uid", "expected_account"}, "invalid_request")
-    _require(type(value["schema_version"]) is int and value["schema_version"] == 1 and _uuid(value["request_id"]), "invalid_request")
-    _require(type(value["expected_uid"]) is int and 0 < value["expected_uid"] < 2**32 - 1, "invalid_request")
-    _require(type(value["expected_account"]) is str and re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]{0,63}", value["expected_account"]), "invalid_request")
-    return value
-
-
 def _parents(path, uid):
     for parent in reversed(path.parents):
         info = parent.lstat()
@@ -264,34 +252,6 @@ def _load(path, uid, *, mode=0o600):
         raise RuntimeRefusal("invalid_retained_metadata") from None
 
 
-def _sync(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _save(path, value, uid, *, new=False):
-    raw = _canonical(value)
-    _require(len(raw) <= LIMIT, "metadata_oversize")
-    if new:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as out:
-            out.write(raw); out.flush(); os.fsync(out.fileno())
-    else:
-        _read(path, uid)
-        fd, temporary = tempfile.mkstemp(prefix=".record-", dir=path.parent)
-        try:
-            with os.fdopen(fd, "wb") as out:
-                out.write(raw); out.flush(); os.fsync(out.fileno())
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-    _sync(path.parent)
-
-
 def _binding(identity):
     return {"uid": identity.uid, "account": identity.account, "home": str(identity.home), "arch": "arm64",
             "profile_id": PROFILE_ID, "policy_sha256": _policy()}
@@ -322,17 +282,100 @@ def _tree(path, uid, *, staged=False):
     return _sha(_canonical(sorted(records, key=lambda row: row["name"])))
 
 
-def _safe_name(name):
-    _require(name and not name.startswith("/") and "\\" not in name and
-             all(part not in ("", ".", "..") for part in name.split("/")), "unsafe_archive_name")
-    return name
-
-
 def _safe_link(name, target):
     _require(target and not target.startswith("/") and "\\" not in target, "unsafe_archive_link")
     resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
     _require(resolved not in (".", "..") and not resolved.startswith("../"), "unsafe_archive_link")
     return resolved
+
+
+def _verify_profile(profile, *, staged=False):
+    _parents(profile.root, profile.uid)
+    _directory(profile.root, profile.uid, 0o700)
+    _require({p.name for p in profile.root.iterdir()} == {"python", "git", "tmux", "jq", "bin", "ca-bundle.pem", "receipt.json"}, "foreign_profile_content")
+    receipt = _load(profile.root / "receipt.json", profile.uid, mode=0o600 if staged else 0o444)
+    _require(type(receipt) is dict and set(receipt) == {"schema_version", "binding", "request_id", "state"}
+             and type(receipt["schema_version"]) is int and receipt["schema_version"] == 1 and receipt["binding"] == _binding(profile)
+             and receipt["state"] == "ready" and _uuid(receipt["request_id"]), "runtime_receipt_changed")
+    for kind, descriptor in _DESCRIPTOR["artifacts"].items():
+        _require(_tree(profile.root / kind, profile.uid, staged=staged) == descriptor["tree_sha256"], "runtime_tree_changed")
+    _require(_sha(_read(profile.ca_bundle, profile.uid, 1024 * 1024, 0o644 if staged else 0o444)) == _DESCRIPTOR["ca_sha256"], "runtime_ca_changed")
+    _directory(profile.bin, profile.uid, 0o755 if staged else 0o555)
+    _require({p.name for p in profile.bin.iterdir()} == set(ALIASES), "runtime_alias_changed")
+    for name, target in ALIASES.items():
+        info = (profile.bin / name).lstat()
+        _require(stat.S_ISLNK(info.st_mode) and info.st_uid == profile.uid and os.readlink(profile.bin / name) == target, "runtime_alias_changed")
+    return receipt
+
+
+def admit_profile(*, expected_uid=None, expected_account=None):
+    identity = _identity(expected_uid=expected_uid, expected_account=expected_account)
+    profile = _profile(identity)
+    _require(profile.root.exists() or profile.root.is_symlink(), "runtime_absent")
+    _parents(profile.root, profile.uid)
+    _verify_profile(profile)
+    return profile
+
+
+def environment(profile):
+    # Callers first gate the exact derived browser installation family.
+    _verify_profile(profile)
+    return {"HOME": str(profile.home), "PATH": str(profile.bin) + ":/usr/bin:/bin:/usr/sbin:/sbin",
+            "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1", "CLAUDLOBBY_NATIVE_PYTHON": str(profile.python), "TMUX_BIN": str(profile.tmux),
+            "GIT_EXEC_PATH": str(profile.git_exec_path), "GIT_TEMPLATE_DIR": str(profile.root / "git/share/git-core/templates"),
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_ASKPASS": "/usr/bin/false", "SSH_ASKPASS": "/usr/bin/false", "GIT_SSL_CAINFO": str(profile.ca_bundle),
+            "SSL_CERT_FILE": str(profile.ca_bundle), "PIP_CONFIG_FILE": "/dev/null", "PIP_NO_INPUT": "1", "PLANE_EMIT_DISABLED": "1"}
+
+
+# END DARWIN RUNTIME ADMISSION
+BUDGET = 900
+_INHERITED_LOCK_FD = None
+CA_MEMBER = "lib/python3.12/site-packages/pip/_vendor/certifi/cacert.pem"
+
+
+def validate_request(operation, value):
+    _require(operation in ("prepare", "status", "discard"), "invalid_operation")
+    _require(type(value) is dict and set(value) == {"schema_version", "request_id", "expected_uid", "expected_account"}, "invalid_request")
+    _require(type(value["schema_version"]) is int and value["schema_version"] == 1 and _uuid(value["request_id"]), "invalid_request")
+    _require(type(value["expected_uid"]) is int and 0 < value["expected_uid"] < 2**32 - 1, "invalid_request")
+    _require(type(value["expected_account"]) is str and re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]{0,63}", value["expected_account"]), "invalid_request")
+    return value
+
+
+def _sync(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _save(path, value, uid, *, new=False):
+    raw = _canonical(value)
+    _require(len(raw) <= LIMIT, "metadata_oversize")
+    if new:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as out:
+            out.write(raw); out.flush(); os.fsync(out.fileno())
+    else:
+        _read(path, uid)
+        fd, temporary = tempfile.mkstemp(prefix=".record-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(raw); out.flush(); os.fsync(out.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    _sync(path.parent)
+
+
+def _safe_name(name):
+    _require(name and not name.startswith("/") and "\\" not in name and
+             all(part not in ("", ".", "..") for part in name.split("/")), "unsafe_archive_name")
+    return name
 
 
 def _selection(member, kind):
@@ -415,25 +458,6 @@ def _extract(path, destination, kind, descriptor, uid):
     _require(_tree(destination, uid, staged=True) == descriptor["tree_sha256"], "extracted_tree_mismatch")
 
 
-def _verify_profile(profile, *, staged=False):
-    _parents(profile.root, profile.uid)
-    _directory(profile.root, profile.uid, 0o700)
-    _require({p.name for p in profile.root.iterdir()} == {"python", "git", "tmux", "jq", "bin", "ca-bundle.pem", "receipt.json"}, "foreign_profile_content")
-    receipt = _load(profile.root / "receipt.json", profile.uid, mode=0o600 if staged else 0o444)
-    _require(type(receipt) is dict and set(receipt) == {"schema_version", "binding", "request_id", "state"}
-             and type(receipt["schema_version"]) is int and receipt["schema_version"] == 1 and receipt["binding"] == _binding(profile)
-             and receipt["state"] == "ready" and _uuid(receipt["request_id"]), "runtime_receipt_changed")
-    for kind, descriptor in _DESCRIPTOR["artifacts"].items():
-        _require(_tree(profile.root / kind, profile.uid, staged=staged) == descriptor["tree_sha256"], "runtime_tree_changed")
-    _require(_sha(_read(profile.ca_bundle, profile.uid, 1024 * 1024, 0o644 if staged else 0o444)) == _DESCRIPTOR["ca_sha256"], "runtime_ca_changed")
-    _directory(profile.bin, profile.uid, 0o755 if staged else 0o555)
-    _require({p.name for p in profile.bin.iterdir()} == set(ALIASES), "runtime_alias_changed")
-    for name, target in ALIASES.items():
-        info = (profile.bin / name).lstat()
-        _require(stat.S_ISLNK(info.st_mode) and info.st_uid == profile.uid and os.readlink(profile.bin / name) == target, "runtime_alias_changed")
-    return receipt
-
-
 def _seal_profile(profile):
     # Only the complete, exact staged profile can cross to immutable modes.
     _verify_profile(profile, staged=True)
@@ -447,27 +471,6 @@ def _seal_profile(profile):
         path = Path(directory)
         os.chmod(path, 0o700 if path == profile.root else 0o555, follow_symlinks=False)
     _verify_profile(profile)
-
-
-def admit_profile(*, expected_uid=None, expected_account=None):
-    identity = _identity(expected_uid=expected_uid, expected_account=expected_account)
-    profile = _profile(identity)
-    _require(profile.root.exists() or profile.root.is_symlink(), "runtime_absent")
-    _parents(profile.root, profile.uid)
-    _verify_profile(profile)
-    return profile
-
-
-def environment(profile):
-    # Callers first gate the exact derived browser installation family.
-    _verify_profile(profile)
-    return {"HOME": str(profile.home), "PATH": str(profile.bin) + ":/usr/bin:/bin:/usr/sbin:/sbin",
-            "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1", "CLAUDLOBBY_NATIVE_PYTHON": str(profile.python), "TMUX_BIN": str(profile.tmux),
-            "GIT_EXEC_PATH": str(profile.git_exec_path), "GIT_TEMPLATE_DIR": str(profile.root / "git/share/git-core/templates"),
-            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
-            "GIT_ASKPASS": "/usr/bin/false", "SSH_ASKPASS": "/usr/bin/false", "GIT_SSL_CAINFO": str(profile.ca_bundle),
-            "SSL_CERT_FILE": str(profile.ca_bundle), "PIP_CONFIG_FILE": "/dev/null", "PIP_NO_INPUT": "1", "PLANE_EMIT_DISABLED": "1"}
 
 
 def git_argv(profile, *arguments):

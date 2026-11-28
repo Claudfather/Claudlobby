@@ -15,6 +15,7 @@ import re
 import stat
 import sys
 
+from ..bootstrap import trusted_system_python
 from ..plane.owner_consent import TrustedWorkspacePresenter
 from .owner_stdio import StdioRefused, _unique
 
@@ -49,9 +50,42 @@ def _private_file(path, *, read=False):
         os.close(fd)
 
 
+def admitted_update(installation, receipt_revision, revision, named):
+    """The finished update that moved this computer from its receipt's revision to ``revision``.
+
+    ``named`` is the computer run's ``update_record``: the request id and target
+    the client read. Admitted only when that is the record on disk, the record
+    is ``done`` as strictly as today's finish tuple reads one (health errors an
+    empty table, out of maintenance, configuration committed, no stage error),
+    it ends at ``revision``, and the receipt's revision is an ancestor of
+    ``revision``. Anything else refuses. Reads only.
+    """
+    from ..git_update import UpdateError, _git, healthy_done, read_update
+    try:
+        record = read_update(installation)
+        if (type(named) is not list or record is None
+                or [record.get("request_id"), record.get("target")] != named
+                or not healthy_done(record)
+                or record["target"] != revision):
+            raise ValueError()
+        if _git(installation, "merge-base", "--is-ancestor", receipt_revision, revision, check=False).returncode:
+            raise ValueError()
+    except (UpdateError, OSError, ValueError, TypeError, KeyError, AttributeError):
+        raise StdioRefused("installation_changed") from None
+    return record
+
+
 class FixedOwnerProfile:
     """One account-database profile; a preparation receipt never licenses repair."""
-    def __init__(self, paths, request):
+    def __init__(self, paths, request, *, updated_source=False, computer=False):
+        """``updated_source`` is the one-operation SSH API only: it carries no
+        finish tuple, and the installed revision is still compared exactly.
+
+        ``computer`` is the computer run. It carries no finish tuple. At the
+        receipt's revision it is admitted as today's guide is; at a later
+        installed revision only when its ``update_record`` names the finished
+        update that moved the computer there (``admitted_update``)."""
+        self._computer = computer  # prepare_provider checks the profile again the same way
         try:
             uid = os.getuid()
             if (uid == 0 or uid != os.geteuid() or uid != request["expected_uid"]
@@ -100,10 +134,19 @@ class FixedOwnerProfile:
             if (not interpreter.is_absolute() or interpreter.resolve() != interpreter
                     or self.runtime is None and interpreter.is_relative_to(self.family)
                     or self.runtime is not None and interpreter != self.runtime.python
-                    or not interpreter.is_file() or _digest(interpreter) != receipt["interpreter_sha256"]):
+                    or not interpreter.is_file() or not isinstance(receipt["interpreter_sha256"], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", receipt["interpreter_sha256"]) is None
+                    or self.runtime is not None and _digest(interpreter) != receipt["interpreter_sha256"]):
                 raise StdioRefused("installation_changed")
-            if request["finish_setup"] is None and receipt["ref"] != request["source_revision"]:
+            # Linux: trusted by place and ownership; the recorded digest stays bound.
+            if self.runtime is None and not trusted_system_python(interpreter):
                 raise StdioRefused("installation_changed")
+            if computer and request["finish_setup"] is not None:
+                raise StdioRefused("installation_changed")
+            if (request["finish_setup"] is None and not updated_source and not computer
+                    and receipt["ref"] != request["source_revision"]):
+                raise StdioRefused("installation_changed")
+            self.receipt_revision = receipt["ref"]
             self.project = self.home / "claudfather-projects/first-team"
             self.account = self.family / "provider-profile"
             self.policy = self.family / "host-policy/system.yaml"
@@ -113,6 +156,8 @@ class FixedOwnerProfile:
             with self.environment():
                 if installation.preflight(expected_revision=request["source_revision"]) != request["source_revision"]:
                     raise StdioRefused("installation_changed")
+                if computer and receipt["ref"] != request["source_revision"]:
+                    admitted_update(installation, receipt["ref"], request["source_revision"], request["update_record"])
         except (OSError, ValueError, KeyError, TypeError):
             raise StdioRefused("installation_changed") from None
 
@@ -130,7 +175,12 @@ class FixedOwnerProfile:
             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_ASKPASS": "/bin/false", "SSH_ASKPASS": "/bin/false", "PIP_CONFIG_FILE": os.devnull,
-            "PIP_NO_INPUT": "1", "PYTHONNOUSERSITE": "1", "PLANE_EMIT_DISABLED": "1"}
+            "PIP_NO_INPUT": "1", "PYTHONNOUSERSITE": "1"}
+        # No PLANE_EMIT_DISABLED here. Preparation silences incidental recording
+        # (bootstrap._browser_environment); the guide is past preparation. The listener
+        # it starts inherits this environment and runs first-team setup from it, and
+        # first-fleet setup refuses under that harness exemption (#2611,
+        # registry_emit.activation_scan_refusal). No guide step records by itself.
         if self.runtime is not None:
             from ..installation import managed_browser_environment
             managed = managed_browser_environment(self.installation)
@@ -168,7 +218,9 @@ class FixedOwnerProfile:
         consent.check_cancel()
         # The decision cannot authorize changed source/account/preparation or
         # filesystem state. A concurrent exact install needs no second write.
-        FixedOwnerProfile(paths, self.request)
+        # The computer run (its link intent) is checked as its own admission was;
+        # today's guide makes today's call.
+        FixedOwnerProfile(paths, self.request, **({"computer": True} if getattr(self, "_computer", False) else {}))
         current = provider_install.status(self.account_name, self.uid)
         if current.state == "ready":
             return current
@@ -182,8 +234,17 @@ class FixedOwnerProfile:
             raise StdioRefused("provider_install_" + result.state)
         return result
 
-    def prepare_directories(self, consent, paths):
-        """Display every create-only fixed-directory effect before any write."""
+    # The whole private override an SSH-controlled computer starts with: the
+    # owner connection job is not enrolled, and every other host job keeps its
+    # packaged configuration because the override names nothing else.
+    SSH_HOST_POLICY = b"host:\n  jobs:\n    plane-owner:\n      enroll: false\n"
+
+    def prepare_directories(self, consent, paths, *, ssh_policy=False):
+        """Display every create-only fixed-directory effect before any write.
+
+        ``ssh_policy`` is the fresh SSH-controlled setup only. An existing
+        private policy is never read for repair, replaced or rewritten here.
+        """
         from .host_owner_setup import _native_directories
         if self.units not in _native_directories(paths):
             raise StdioRefused("native_manager_prerequisite_missing")
@@ -201,11 +262,24 @@ class FixedOwnerProfile:
         make_env = not os.path.lexists(env)
         if not make_env:
             _private_file(env)  # Metadata only; never read credential contents.
-        if missing or make_env:
-            consent.approve("prepare_directories", {"directories": [str(p) for p in missing],
+        make_policy = ssh_policy and not os.path.lexists(self.policy)
+        if ssh_policy and not make_policy:
+            _private_file(self.policy)  # Metadata only; existing policy stays as it is.
+        if missing or make_env or make_policy:
+            scope = {"directories": [str(p) for p in missing],
                 "empty_private_environment": str(env) if make_env else None,
                 "provider_directory": str(self.provider.parent),
-                "effects": ["create only these fixed owned directories and empty private environment; no downloads or root setup"]})
+                "effects": ["create only these fixed owned directories and empty private environment; no downloads or root setup"]}
+            if ssh_policy:
+                scope["host_policy"] = None if not make_policy else {
+                    "path": str(self.policy), "sha256": hashlib.sha256(self.SSH_HOST_POLICY).hexdigest(),
+                    "job": "plane-owner", "enroll": False}
+                if make_policy:
+                    scope["effects"].append(
+                        "this computer is controlled over your SSH connection, so no always-on owner "
+                        "connection service is set up; create one private settings file recording that; "
+                        "ordinary team jobs are unchanged and no existing settings are replaced")
+            consent.approve("prepare_directories", scope)
             for path, identity in retained.items():
                 if _directory(path, private=path not in (self.units.parent.parent, self.units.parent, self.units)) != identity:
                     raise StdioRefused("prerequisite_changed")
@@ -216,6 +290,18 @@ class FixedOwnerProfile:
             if make_env:
                 fd = os.open(env, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                 os.close(fd)
+            if make_policy:
+                _directory(self.policy.parent)
+                # Create-only: an unexpected node appearing since approval refuses.
+                try:
+                    fd = os.open(self.policy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                except FileExistsError:
+                    raise StdioRefused("prerequisite_changed") from None
+                try:
+                    os.write(fd, self.SSH_HOST_POLICY)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
 
     def origin(self):
         """Read the official native daemon's own HTTPS identity; never a form URL."""

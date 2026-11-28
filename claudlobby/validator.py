@@ -1885,7 +1885,8 @@ def _validate_projects(
                 f"{hint(project.validation.tier, VALID_TIERS)}"
             )
 
-        if not project.repos:
+        # A project derived from a `project` mount is joined by its folder.
+        if not project.repos and project.directory is None:
             report.errors.append(
                 f"{label}: repos is empty — repos is the join key that maps "
                 f"work to this project's closure bar"
@@ -2123,11 +2124,12 @@ def _validate_goal_binding(
                 "projects-missing",
                 f"bot(s) {', '.join(equipped)} are check-in-equipped but no "
                 f"'## Projects' table can compose: this fleet declares no "
-                f"projects.yaml and no bot declares scope.repos, so the "
-                f"derivation had nothing to derive from — the check-in's "
-                f"'dispatch' action needs --project and is unavailable. Give a "
-                f"bot a 'scope: {{org: <org>, repos: [<repo>]}}' block, or "
-                f"declare projects.yaml beside fleet.yaml"
+                f"projects.yaml and no bot declares scope.repos or a project "
+                f"mount, so the derivation had nothing to derive from — the "
+                f"check-in's 'dispatch' action needs --project and is "
+                f"unavailable. Give a bot a 'scope: {{org: <org>, repos: "
+                f"[<repo>]}}' block or a 'mounts: {{project: <folder>}}' entry, "
+                f"or declare projects.yaml beside fleet.yaml"
                 + (
                     NO_DOOR_CO_REQUISITE
                     if ignition_gap(fleet, paths, doors)
